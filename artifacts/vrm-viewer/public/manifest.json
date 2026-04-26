@@ -1,0 +1,20 @@
+{
+  "name": "Hina AI",
+  "short_name": "Hina",
+  "description": "Asistente virtual anime con avatar 3D y chat impulsado por Gemini.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "lang": "es",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

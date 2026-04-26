@@ -2,8 +2,19 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>Visor VRM</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover" />
+    <title>Hina AI</title>
+
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="apple-touch-icon" href="icon.svg" />
+    <meta name="theme-color" content="#1a1a2e" />
+    <meta name="description" content="Asistente virtual anime con avatar 3D y chat impulsado por Gemini." />
+
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Hina AI" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <style>
       html, body {
         margin: 0;
@@ -218,5 +229,19 @@
     </div>
 
     <script type="module" src="/script.js"></script>
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("sw.js")
+            .then((reg) =>
+              console.log("[pwa] Service Worker registrado:", reg.scope),
+            )
+            .catch((err) =>
+              console.warn("[pwa] Fallo registrando Service Worker:", err),
+            );
+        });
+      }
+    </script>
   </body>
 </html>
