@@ -164,6 +164,52 @@ function appendMessage(text, sender) {
 }
 
 let happyTimeoutId = null;
+let lipSyncTimers = [];
+let lipSyncToken = 0;
+
+function simulateLipSync(text) {
+  for (const id of lipSyncTimers) clearTimeout(id);
+  lipSyncTimers = [];
+
+  lipSyncToken += 1;
+  const myToken = lipSyncToken;
+
+  if (!currentVrm || !currentVrm.expressionManager) return;
+  if (!text) return;
+
+  const stepMs = 75;
+  const openMs = 45;
+  let t = 0;
+
+  for (const ch of text) {
+    if (/\s/.test(ch) || /[.,;:!?¡¿…\-—()"']/.test(ch)) {
+      t += stepMs;
+      continue;
+    }
+
+    const openId = window.setTimeout(() => {
+      if (myToken !== lipSyncToken) return;
+      if (!currentVrm || !currentVrm.expressionManager) return;
+      currentVrm.expressionManager.setValue("aa", 1.0);
+    }, t);
+
+    const closeId = window.setTimeout(() => {
+      if (myToken !== lipSyncToken) return;
+      if (!currentVrm || !currentVrm.expressionManager) return;
+      currentVrm.expressionManager.setValue("aa", 0);
+    }, t + openMs);
+
+    lipSyncTimers.push(openId, closeId);
+    t += stepMs;
+  }
+
+  const finalId = window.setTimeout(() => {
+    if (myToken !== lipSyncToken) return;
+    if (!currentVrm || !currentVrm.expressionManager) return;
+    currentVrm.expressionManager.setValue("aa", 0);
+  }, t + 60);
+  lipSyncTimers.push(finalId);
+}
 
 function reactHappy(durationMs = 2000) {
   if (!currentVrm || !currentVrm.expressionManager) return;
@@ -239,6 +285,7 @@ async function handleUserMessage(text) {
       appendMessage(reply, "bot");
     }
     reactHappy(3000);
+    simulateLipSync(reply);
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
     const detail = error?.message ? ` (${error.message})` : "";
