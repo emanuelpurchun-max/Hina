@@ -3,6 +3,10 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
+const GEMINI_API_KEY = "AIzaSyB3Z2iVfpzfUUbqrA4tGBj3CDwz0r4P2w8";
+const GEMINI_ENDPOINT =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=";
+
 const info = document.getElementById("info");
 
 const scene = new THREE.Scene();
@@ -152,12 +156,13 @@ const chatBar = document.getElementById("chat-bar");
 const chatInput = document.getElementById("chat-input");
 
 function appendMessage(text, sender) {
-  if (!chatLog) return;
+  if (!chatLog) return null;
   const msg = document.createElement("div");
   msg.className = `chat-message ${sender}`;
   msg.textContent = text;
   chatLog.appendChild(msg);
   chatLog.scrollTop = chatLog.scrollHeight;
+  return msg;
 }
 
 let happyTimeoutId = null;
@@ -176,18 +181,70 @@ function reactHappy(durationMs = 2000) {
   }, durationMs);
 }
 
-function handleUserMessage(text) {
+const SYSTEM_INSTRUCTION =
+  "Eres Hina, una asistente virtual anime amable y experta en programación. Tus respuestas deben ser breves, claras y en español.";
+
+async function askGemini(userText) {
+  const response = await fetch(`${GEMINI_ENDPOINT}${GEMINI_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: {
+        role: "system",
+        parts: [{ text: SYSTEM_INSTRUCTION }],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: userText }],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gemini HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+  const reply = data?.candidates?.[0]?.content?.parts
+    ?.map((p) => p.text)
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+
+  if (!reply) {
+    throw new Error("Respuesta vacía de Gemini");
+  }
+  return reply;
+}
+
+async function handleUserMessage(text) {
   const trimmed = text.trim();
   if (!trimmed) return;
 
   appendMessage(trimmed, "user");
   chatInput.value = "";
 
-  reactHappy(2000);
+  const thinkingBubble = appendMessage("Hina está pensando...", "bot");
 
-  window.setTimeout(() => {
-    appendMessage("¡Recibido! Estoy procesando tu mensaje...", "bot");
-  }, 600);
+  try {
+    const reply = await askGemini(trimmed);
+    if (thinkingBubble) {
+      thinkingBubble.textContent = reply;
+    } else {
+      appendMessage(reply, "bot");
+    }
+    reactHappy(3000);
+  } catch (error) {
+    console.error("Error consultando a Gemini:", error);
+    if (thinkingBubble) {
+      thinkingBubble.textContent =
+        "Hina tuvo un pequeño problema de conexión";
+    } else {
+      appendMessage("Hina tuvo un pequeño problema de conexión", "bot");
+    }
+  }
 }
 
 if (chatBar) {
