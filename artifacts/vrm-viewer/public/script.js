@@ -42,11 +42,45 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.1;
 controls.update();
 
+const clock = new THREE.Clock();
+
+const lookAtTarget = new THREE.Object3D();
+lookAtTarget.position.set(0, 1.4, 2);
+scene.add(lookAtTarget);
+
+let currentVrm = null;
+let blinkTimer = 0;
+let nextBlinkAt = 2 + Math.random() * 3;
+let blinkPhase = 0;
+
+function updateLookAtTargetFromPointer(clientX, clientY) {
+  const x = (clientX / window.innerWidth) * 2 - 1;
+  const y = -(clientY / window.innerHeight) * 2 + 1;
+
+  const headHeight = currentVrm
+    ? controls.target.y
+    : 1.4;
+
+  lookAtTarget.position.set(x * 1.5, headHeight + y * 0.8, 2);
+}
+
+window.addEventListener("mousemove", (event) => {
+  updateLookAtTargetFromPointer(event.clientX, event.clientY);
+});
+
+window.addEventListener(
+  "touchmove",
+  (event) => {
+    if (event.touches.length > 0) {
+      const touch = event.touches[0];
+      updateLookAtTargetFromPointer(touch.clientX, touch.clientY);
+    }
+  },
+  { passive: true },
+);
+
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
-
-const clock = new THREE.Clock();
-let currentVrm = null;
 
 loader.load(
   "personaje.vrm",
@@ -65,6 +99,19 @@ loader.load(
     scene.add(vrm.scene);
     currentVrm = vrm;
 
+    const leftUpperArm = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+    const rightUpperArm = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+    if (leftUpperArm) {
+      leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
+    }
+    if (rightUpperArm) {
+      rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
+    }
+
+    if (vrm.lookAt) {
+      vrm.lookAt.target = lookAtTarget;
+    }
+
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
@@ -77,7 +124,7 @@ loader.load(
     controls.update();
 
     if (info) {
-      info.textContent = "personaje.vrm cargado · arrastra para rotar";
+      info.textContent = "personaje.vrm cargado · mueve el cursor";
     }
   },
   (progress) => {
@@ -102,10 +149,46 @@ window.addEventListener("resize", () => {
 
 function animate() {
   requestAnimationFrame(animate);
+
   const delta = clock.getDelta();
+  const elapsed = clock.elapsedTime;
+
   if (currentVrm) {
+    const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
+    if (spine) {
+      spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
+    }
+
+    const expressionManager = currentVrm.expressionManager;
+    if (expressionManager) {
+      blinkTimer += delta;
+      if (blinkPhase === 0 && blinkTimer >= nextBlinkAt) {
+        blinkPhase = 1;
+        blinkTimer = 0;
+      }
+
+      let blinkValue = 0;
+      if (blinkPhase === 1) {
+        blinkValue = Math.min(blinkTimer / 0.08, 1);
+        if (blinkValue >= 1) {
+          blinkPhase = 2;
+          blinkTimer = 0;
+        }
+      } else if (blinkPhase === 2) {
+        blinkValue = 1 - Math.min(blinkTimer / 0.12, 1);
+        if (blinkValue <= 0) {
+          blinkPhase = 0;
+          blinkTimer = 0;
+          nextBlinkAt = 2 + Math.random() * 3;
+          blinkValue = 0;
+        }
+      }
+      expressionManager.setValue("blink", blinkValue);
+    }
+
     currentVrm.update(delta);
   }
+
   controls.update();
   renderer.render(scene, camera);
 }
