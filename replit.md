@@ -16,6 +16,13 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
 
+## Artifacts
+
+- **vrm-viewer** (`/`): Vanilla HTML + JS Three.js viewer for the `personaje.vrm` model.
+  - `index.html` declares an importmap that loads `three`, `three/addons/`, and `@pixiv/three-vrm` from jsDelivr.
+  - `script.js` (served from `public/` so Vite ships it untouched) sets up the scene, lights, camera, OrbitControls, and the VRM loader plugin.
+  - The VRM file lives at `public/personaje.vrm`.
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages

@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "VRM Viewer"
+version = "1.0.0"
+id = "artifacts/vrm-viewer"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20034
+
+[services.development]
+run = "pnpm --filter @workspace/vrm-viewer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/vrm-viewer", "run", "build" ]
+publicDir = "artifacts/vrm-viewer/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20034"
+BASE_PATH = "/"
