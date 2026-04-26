@@ -180,21 +180,44 @@ function reactHappy(durationMs = 2000) {
 }
 
 async function askGemini(userText) {
+  const requestBody = JSON.stringify({ message: userText });
+  console.log("Petición al servidor:", { url: CHAT_ENDPOINT, body: requestBody });
+
   const response = await fetch(CHAT_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: userText }),
+    body: requestBody,
   });
 
-  if (!response.ok) {
-    throw new Error(`Chat HTTP ${response.status}`);
+  const rawText = await response.text();
+  let data = null;
+  try {
+    data = rawText ? JSON.parse(rawText) : null;
+  } catch (parseErr) {
+    console.error(
+      "Respuesta del servidor (no es JSON):",
+      response.status,
+      rawText,
+    );
+    throw new Error(
+      `Respuesta no-JSON del servidor (HTTP ${response.status})`,
+    );
   }
 
-  const data = await response.json();
-  const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
+  console.log("Respuesta del servidor:", data);
 
+  if (!response.ok) {
+    const detail = data?.error ? ` - ${data.error}` : "";
+    console.error(
+      `Error del servidor: HTTP ${response.status}${detail}`,
+      data,
+    );
+    throw new Error(`HTTP ${response.status}${detail}`);
+  }
+
+  const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
   if (!reply) {
-    throw new Error("Respuesta vacía del servidor");
+    throw new Error("El servidor respondió 200 pero sin campo 'reply'");
   }
   return reply;
 }
@@ -218,11 +241,12 @@ async function handleUserMessage(text) {
     reactHappy(3000);
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
+    const detail = error?.message ? ` (${error.message})` : "";
+    const errorText = `Hina tuvo un pequeño problema de conexión${detail}`;
     if (thinkingBubble) {
-      thinkingBubble.textContent =
-        "Hina tuvo un pequeño problema de conexión";
+      thinkingBubble.textContent = errorText;
     } else {
-      appendMessage("Hina tuvo un pequeño problema de conexión", "bot");
+      appendMessage(errorText, "bot");
     }
   }
 }
