@@ -12,22 +12,164 @@
         height: 100%;
         overflow: hidden;
         background: #1a1a2e;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #ffffff;
       }
       canvas {
         display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 0;
       }
       #info {
         position: absolute;
         top: 12px;
         left: 12px;
         color: #ffffff;
-        font-family: system-ui, -apple-system, sans-serif;
         font-size: 13px;
         padding: 8px 12px;
         background: rgba(0, 0, 0, 0.4);
         border-radius: 6px;
         pointer-events: none;
         z-index: 10;
+      }
+
+      #chat-container {
+        position: fixed;
+        left: 50%;
+        bottom: 20px;
+        transform: translateX(-50%);
+        width: min(720px, calc(100% - 32px));
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        pointer-events: none;
+      }
+
+      #chat-log {
+        max-height: 40vh;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 14px 16px;
+        border-radius: 18px;
+        background: rgba(20, 20, 40, 0.35);
+        backdrop-filter: blur(16px) saturate(160%);
+        -webkit-backdrop-filter: blur(16px) saturate(160%);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
+      }
+
+      #chat-log:empty {
+        display: none;
+      }
+
+      #chat-log::-webkit-scrollbar {
+        width: 6px;
+      }
+      #chat-log::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.18);
+        border-radius: 3px;
+      }
+
+      .chat-message {
+        max-width: 80%;
+        padding: 8px 14px;
+        border-radius: 14px;
+        font-size: 14px;
+        line-height: 1.4;
+        word-wrap: break-word;
+      }
+      .chat-message.user {
+        align-self: flex-end;
+        background: rgba(120, 140, 255, 0.45);
+        border: 1px solid rgba(180, 200, 255, 0.35);
+      }
+      .chat-message.bot {
+        align-self: flex-start;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+      }
+
+      #chat-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(20px) saturate(180%);
+        -webkit-backdrop-filter: blur(20px) saturate(180%);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
+      }
+
+      .chat-btn {
+        flex: 0 0 auto;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.06);
+        color: #ffffff;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.18s ease, transform 0.18s ease;
+      }
+      .chat-btn:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+      .chat-btn:active {
+        transform: scale(0.94);
+      }
+      .chat-btn svg {
+        width: 20px;
+        height: 20px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      #chat-input {
+        flex: 1 1 auto;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #ffffff;
+        font-size: 15px;
+        padding: 10px 8px;
+        min-width: 0;
+      }
+      #chat-input::placeholder {
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      #send-btn {
+        background: linear-gradient(135deg, #6a8bff, #b06bff);
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        font-size: 18px;
+        font-weight: 600;
+      }
+      #send-btn:hover {
+        background: linear-gradient(135deg, #7c9cff, #c07cff);
+      }
+
+      @media (max-width: 480px) {
+        .chat-btn {
+          width: 36px;
+          height: 36px;
+        }
+        #chat-input {
+          font-size: 14px;
+        }
       }
     </style>
     <script type="importmap">
@@ -42,6 +184,40 @@
   </head>
   <body>
     <div id="info">Cargando personaje.vrm…</div>
+
+    <div id="chat-container">
+      <div id="chat-log"></div>
+
+      <form id="chat-bar" autocomplete="off">
+        <button type="button" class="chat-btn" id="camera-btn" aria-label="Adjuntar imagen">
+          <svg viewBox="0 0 24 24">
+            <path d="M4 7h3l2-2h6l2 2h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+        </button>
+
+        <button type="button" class="chat-btn" id="mic-btn" aria-label="Grabar audio">
+          <svg viewBox="0 0 24 24">
+            <rect x="9" y="3" width="6" height="12" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0" />
+            <path d="M12 18v3" />
+            <path d="M9 21h6" />
+          </svg>
+        </button>
+
+        <input
+          id="chat-input"
+          type="text"
+          placeholder="Escribe un mensaje…"
+          aria-label="Mensaje"
+        />
+
+        <button type="submit" class="chat-btn" id="send-btn" aria-label="Enviar">
+          ➤
+        </button>
+      </form>
+    </div>
+
     <script type="module" src="/script.js"></script>
   </body>
 </html>
