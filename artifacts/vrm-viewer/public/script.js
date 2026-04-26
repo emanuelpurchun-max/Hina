@@ -147,6 +147,65 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+const chatLog = document.getElementById("chat-log");
+const chatBar = document.getElementById("chat-bar");
+const chatInput = document.getElementById("chat-input");
+
+function appendMessage(text, sender) {
+  if (!chatLog) return;
+  const msg = document.createElement("div");
+  msg.className = `chat-message ${sender}`;
+  msg.textContent = text;
+  chatLog.appendChild(msg);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+let happyTimeoutId = null;
+
+function reactHappy(durationMs = 2000) {
+  if (!currentVrm || !currentVrm.expressionManager) return;
+  currentVrm.expressionManager.setValue("happy", 1);
+  if (happyTimeoutId !== null) {
+    clearTimeout(happyTimeoutId);
+  }
+  happyTimeoutId = window.setTimeout(() => {
+    if (currentVrm && currentVrm.expressionManager) {
+      currentVrm.expressionManager.setValue("happy", 0);
+    }
+    happyTimeoutId = null;
+  }, durationMs);
+}
+
+function handleUserMessage(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  appendMessage(trimmed, "user");
+  chatInput.value = "";
+
+  reactHappy(2000);
+
+  window.setTimeout(() => {
+    appendMessage("¡Recibido! Estoy procesando tu mensaje...", "bot");
+  }, 600);
+}
+
+if (chatBar) {
+  chatBar.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleUserMessage(chatInput.value);
+  });
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleUserMessage(chatInput.value);
+    }
+  });
+}
+
 function animate() {
   requestAnimationFrame(animate);
 
