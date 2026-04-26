@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import path from "path";
+import { createApiApp } from "./server.js";
 
 const rawPort = process.env.PORT;
 
@@ -23,9 +24,22 @@ if (!basePath) {
   );
 }
 
+const apiMountPath = basePath.replace(/\/$/, "") || "/";
+
+const geminiProxyPlugin = {
+  name: "gemini-proxy",
+  configureServer(server: { middlewares: { use: Function } }) {
+    server.middlewares.use(apiMountPath, createApiApp());
+  },
+  configurePreviewServer(server: { middlewares: { use: Function } }) {
+    server.middlewares.use(apiMountPath, createApiApp());
+  },
+};
+
 export default defineConfig({
   base: basePath,
   root: path.resolve(import.meta.dirname),
+  plugins: [geminiProxyPlugin],
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,

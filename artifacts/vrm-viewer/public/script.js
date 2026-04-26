@@ -3,9 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
-const GEMINI_API_KEY = "AIzaSyB3Z2iVfpzfUUbqrA4tGBj3CDwz0r4P2w8";
-const GEMINI_ENDPOINT =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=";
+const CHAT_ENDPOINT = new URL("api/chat", document.baseURI).href;
 
 const info = document.getElementById("info");
 
@@ -181,40 +179,22 @@ function reactHappy(durationMs = 2000) {
   }, durationMs);
 }
 
-const SYSTEM_INSTRUCTION =
-  "Eres Hina, una asistente virtual anime amable y experta en programación. Tus respuestas deben ser breves, claras y en español.";
-
 async function askGemini(userText) {
-  const response = await fetch(`${GEMINI_ENDPOINT}${GEMINI_API_KEY}`, {
+  const response = await fetch(CHAT_ENDPOINT, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: {
-        role: "system",
-        parts: [{ text: SYSTEM_INSTRUCTION }],
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: userText }],
-        },
-      ],
-    }),
+    body: JSON.stringify({ message: userText }),
   });
 
   if (!response.ok) {
-    throw new Error(`Gemini HTTP ${response.status}`);
+    throw new Error(`Chat HTTP ${response.status}`);
   }
 
   const data = await response.json();
-  const reply = data?.candidates?.[0]?.content?.parts
-    ?.map((p) => p.text)
-    .filter(Boolean)
-    .join("\n")
-    .trim();
+  const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
 
   if (!reply) {
-    throw new Error("Respuesta vacía de Gemini");
+    throw new Error("Respuesta vacía del servidor");
   }
   return reply;
 }

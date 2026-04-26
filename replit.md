@@ -18,9 +18,12 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 ## Artifacts
 
-- **vrm-viewer** (`/`): Vanilla HTML + JS Three.js viewer for the `personaje.vrm` model.
+- **vrm-viewer** (`/`): Vanilla HTML + JS Three.js viewer for the `personaje.vrm` model with a glassmorphism chat backed by Gemini.
   - `index.html` declares an importmap that loads `three`, `three/addons/`, and `@pixiv/three-vrm` from jsDelivr.
-  - `script.js` (served from `public/` so Vite ships it untouched) sets up the scene, lights, camera, OrbitControls, and the VRM loader plugin.
+  - `script.js` (served from `public/` so Vite ships it untouched) sets up the scene, lights, camera, OrbitControls, the VRM loader plugin, blink/breathing/lookAt, and the chat UI. It POSTs `{ message }` to `api/chat` (resolved via `document.baseURI`).
+  - `server.js` exports `createApiApp()`: an Express app with `POST /api/chat` that reads `process.env.GEMINI_API_KEY` and proxies to `gemini-flash-latest`. The browser never sees the key.
+  - `vite.config.ts` mounts `createApiApp()` as Vite middleware (`configureServer` and `configurePreviewServer`) at the artifact's `BASE_PATH`, so dev and preview both run on a single port.
+  - `GEMINI_API_KEY` is stored as a Replit Secret (not in code).
   - The VRM file lives at `public/personaje.vrm`.
 
 ## Key Commands
