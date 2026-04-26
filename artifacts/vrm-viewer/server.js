@@ -10,7 +10,14 @@ export function createApiApp() {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
-  app.post("/api/chat", async (req, res) => {
+  app.post("/chat", async (req, res) => {
+    console.log("--- PETICIÓN RECIBIDA ---", {
+      path: req.originalUrl,
+      bodyMessage: typeof req.body?.message === "string"
+        ? req.body.message.slice(0, 80)
+        : null,
+    });
+
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return res

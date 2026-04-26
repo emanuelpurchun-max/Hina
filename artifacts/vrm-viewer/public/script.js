@@ -3,7 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
-const CHAT_ENDPOINT = new URL("api/chat", document.baseURI).href;
+const CHAT_ENDPOINT = "/chat";
 
 const info = document.getElementById("info");
 
