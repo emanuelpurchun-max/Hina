@@ -102,6 +102,43 @@
       }
       .chat-message.bot {
         align-self: flex-start;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .chat-message.bot .bubble-text {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .play-btn {
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: rgba(255, 255, 255, 0.08);
+        color: #fff;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        line-height: 1;
+        transition: background 0.15s ease, transform 0.1s ease;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .play-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
+      }
+      .play-btn:active {
+        transform: scale(0.92);
+      }
+      .play-btn svg {
+        width: 10px;
+        height: 10px;
+        fill: #fff;
+        display: block;
+        margin-left: 1px;
       }
 
       #chat-bar {

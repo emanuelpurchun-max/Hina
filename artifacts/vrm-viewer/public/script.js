@@ -157,21 +157,100 @@ function appendMessage(text, sender) {
   if (!chatLog) return null;
   const msg = document.createElement("div");
   msg.className = `chat-message ${sender}`;
-  msg.textContent = text;
+
+  if (sender === "bot") {
+    const textEl = document.createElement("span");
+    textEl.className = "bubble-text";
+    textEl.textContent = text;
+    msg.appendChild(textEl);
+
+    const playBtn = document.createElement("button");
+    playBtn.type = "button";
+    playBtn.className = "play-btn";
+    playBtn.setAttribute("aria-label", "Reproducir audio");
+    playBtn.innerHTML =
+      '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 1 L9 5 L2 9 Z"/></svg>';
+    playBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const current = textEl.textContent || "";
+      if (current) speakResponse(current);
+    });
+    msg.appendChild(playBtn);
+  } else {
+    msg.textContent = text;
+  }
+
   chatLog.appendChild(msg);
   chatLog.scrollTop = chatLog.scrollHeight;
   return msg;
+}
+
+function setBubbleText(bubble, text) {
+  if (!bubble) return;
+  const textEl = bubble.querySelector(".bubble-text");
+  if (textEl) {
+    textEl.textContent = text;
+  } else {
+    bubble.textContent = text;
+  }
 }
 
 let happyTimeoutId = null;
 let lipSyncRafId = null;
 let lipSyncStartedAt = 0;
 
+let fallbackLipSyncIntervalId = null;
+let fallbackLipSyncTimeoutId = null;
+
+function stopFallbackLipSync() {
+  if (fallbackLipSyncIntervalId !== null) {
+    clearInterval(fallbackLipSyncIntervalId);
+    fallbackLipSyncIntervalId = null;
+  }
+  if (fallbackLipSyncTimeoutId !== null) {
+    clearTimeout(fallbackLipSyncTimeoutId);
+    fallbackLipSyncTimeoutId = null;
+  }
+}
+
+function fallbackLipSync(text) {
+  stopFallbackLipSync();
+  if (!currentVrm || !currentVrm.expressionManager) return;
+
+  const length = (text && text.length) || 20;
+  const durationMs = Math.max(1500, Math.min(12000, length * 70));
+  const startedAt = performance.now();
+
+  console.log(
+    "[speech] fallback lip-sync activado (",
+    durationMs,
+    "ms, 75ms tick)",
+  );
+
+  fallbackLipSyncIntervalId = setInterval(() => {
+    if (!currentVrm || !currentVrm.expressionManager) return;
+    const t = (performance.now() - startedAt) / 1000;
+    const wave = Math.abs(Math.sin(t * 9));
+    const jitter = (Math.random() - 0.5) * 0.15;
+    const value = Math.max(0, Math.min(1, 0.35 + wave * 0.55 + jitter));
+    currentVrm.expressionManager.setValue("aa", value);
+  }, 75);
+
+  fallbackLipSyncTimeoutId = setTimeout(() => {
+    stopFallbackLipSync();
+    if (currentVrm && currentVrm.expressionManager) {
+      currentVrm.expressionManager.setValue("aa", 0);
+    }
+  }, durationMs);
+}
+
 function stopLipSync() {
   if (lipSyncRafId !== null) {
     cancelAnimationFrame(lipSyncRafId);
     lipSyncRafId = null;
   }
+  stopFallbackLipSync();
   if (currentVrm && currentVrm.expressionManager) {
     currentVrm.expressionManager.setValue("aa", 0);
   }
@@ -304,8 +383,9 @@ function doSpeak(text) {
     stopLipSync();
   };
   utter.onerror = (event) => {
-    console.warn("[speech] onerror:", event.error);
+    console.warn("[speech] onerror:", event.error, "→ usando lip-sync de respaldo");
     stopLipSync();
+    fallbackLipSync(text);
   };
 
   speechSynthesis.speak(utter);
@@ -316,10 +396,17 @@ function speakResponse(text) {
 
   if (typeof speechSynthesis === "undefined") {
     console.warn("[speech] Web Speech API no disponible en este navegador");
+    fallbackLipSync(text);
     return;
   }
 
-  speechSynthesis.cancel();
+  try {
+    speechSynthesis.pause();
+    speechSynthesis.resume();
+    speechSynthesis.cancel();
+  } catch (err) {
+    console.warn("[speech] force-reset falló:", err);
+  }
   stopLipSync();
 
   if (!text) return;
@@ -401,7 +488,9 @@ async function askGemini(userText) {
       `Error del servidor: HTTP ${response.status}${detail}`,
       data,
     );
-    throw new Error(`HTTP ${response.status}${detail}`);
+    const err = new Error(`HTTP ${response.status}${detail}`);
+    err.status = response.status;
+    throw err;
   }
 
   const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
@@ -429,7 +518,7 @@ async function handleUserMessage(text) {
   try {
     const reply = await askGemini(trimmed);
     if (thinkingBubble) {
-      thinkingBubble.textContent = reply;
+      setBubbleText(thinkingBubble, reply);
     } else {
       appendMessage(reply, "bot");
     }
@@ -437,10 +526,17 @@ async function handleUserMessage(text) {
     speakResponse(reply);
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
-    const detail = error?.message ? ` (${error.message})` : "";
-    const errorText = `Hina tuvo un pequeño problema de conexión${detail}`;
+
+    let errorText;
+    if (error?.status === 429) {
+      errorText = "¡Oye, vas muy rápido! Dame un respiro de 30 segundos.";
+    } else {
+      const detail = error?.message ? ` (${error.message})` : "";
+      errorText = `Hina tuvo un pequeño problema de conexión${detail}`;
+    }
+
     if (thinkingBubble) {
-      thinkingBubble.textContent = errorText;
+      setBubbleText(thinkingBubble, errorText);
     } else {
       appendMessage(errorText, "bot");
     }
