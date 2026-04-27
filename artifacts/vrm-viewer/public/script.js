@@ -164,51 +164,141 @@ function appendMessage(text, sender) {
 }
 
 let happyTimeoutId = null;
-let lipSyncTimers = [];
-let lipSyncToken = 0;
+let lipSyncRafId = null;
+let lipSyncStartedAt = 0;
 
-function simulateLipSync(text) {
-  for (const id of lipSyncTimers) clearTimeout(id);
-  lipSyncTimers = [];
+function stopLipSync() {
+  if (lipSyncRafId !== null) {
+    cancelAnimationFrame(lipSyncRafId);
+    lipSyncRafId = null;
+  }
+  if (currentVrm && currentVrm.expressionManager) {
+    currentVrm.expressionManager.setValue("aa", 0);
+  }
+}
 
-  lipSyncToken += 1;
-  const myToken = lipSyncToken;
+function simulateLipSync() {
+  if (lipSyncRafId !== null) return;
+  if (typeof speechSynthesis === "undefined") return;
 
-  if (!currentVrm || !currentVrm.expressionManager) return;
-  if (!text) return;
+  lipSyncStartedAt = performance.now();
 
-  const stepMs = 75;
-  const openMs = 45;
-  let t = 0;
+  const tick = (now) => {
+    lipSyncRafId = null;
 
-  for (const ch of text) {
-    if (/\s/.test(ch) || /[.,;:!?¡¿…\-—()"']/.test(ch)) {
-      t += stepMs;
-      continue;
+    if (!speechSynthesis.speaking) {
+      if (currentVrm && currentVrm.expressionManager) {
+        currentVrm.expressionManager.setValue("aa", 0);
+      }
+      return;
     }
 
-    const openId = window.setTimeout(() => {
-      if (myToken !== lipSyncToken) return;
-      if (!currentVrm || !currentVrm.expressionManager) return;
-      currentVrm.expressionManager.setValue("aa", 1.0);
-    }, t);
+    if (currentVrm && currentVrm.expressionManager) {
+      const t = (now - lipSyncStartedAt) / 1000;
+      const wave = Math.abs(Math.sin(t * 9));
+      const jitter = (Math.random() - 0.5) * 0.15;
+      const value = Math.max(0, Math.min(1, 0.35 + wave * 0.55 + jitter));
+      currentVrm.expressionManager.setValue("aa", value);
+    }
 
-    const closeId = window.setTimeout(() => {
-      if (myToken !== lipSyncToken) return;
-      if (!currentVrm || !currentVrm.expressionManager) return;
-      currentVrm.expressionManager.setValue("aa", 0);
-    }, t + openMs);
+    lipSyncRafId = requestAnimationFrame(tick);
+  };
 
-    lipSyncTimers.push(openId, closeId);
-    t += stepMs;
+  lipSyncRafId = requestAnimationFrame(tick);
+}
+
+let cachedVoices = [];
+
+function loadVoices() {
+  if (typeof speechSynthesis === "undefined") return;
+  cachedVoices = speechSynthesis.getVoices() || [];
+}
+
+if (typeof speechSynthesis !== "undefined") {
+  loadVoices();
+  if (typeof speechSynthesis.addEventListener === "function") {
+    speechSynthesis.addEventListener("voiceschanged", loadVoices);
+  } else {
+    speechSynthesis.onvoiceschanged = loadVoices;
   }
+}
 
-  const finalId = window.setTimeout(() => {
-    if (myToken !== lipSyncToken) return;
-    if (!currentVrm || !currentVrm.expressionManager) return;
-    currentVrm.expressionManager.setValue("aa", 0);
-  }, t + 60);
-  lipSyncTimers.push(finalId);
+function pickSpanishFemaleVoice() {
+  if (cachedVoices.length === 0) loadVoices();
+  const esVoices = cachedVoices.filter((v) =>
+    (v.lang || "").toLowerCase().startsWith("es"),
+  );
+  if (esVoices.length === 0) return null;
+
+  const femaleHints = [
+    "female",
+    "mujer",
+    "mónica",
+    "monica",
+    "paulina",
+    "marisol",
+    "esperanza",
+    "sabina",
+    "helena",
+    "lucia",
+    "lucía",
+    "sara",
+    "laura",
+    "carmen",
+    "elvira",
+    "google español",
+  ];
+  const maleHints = ["male", "masculino", "jorge", "diego", "carlos", "juan"];
+
+  const female = esVoices.find((v) => {
+    const n = (v.name || "").toLowerCase();
+    return (
+      femaleHints.some((h) => n.includes(h)) &&
+      !maleHints.some((h) => n.includes(h))
+    );
+  });
+
+  return female || esVoices[0];
+}
+
+let speechPrimed = false;
+
+function primeSpeech() {
+  if (speechPrimed || typeof speechSynthesis === "undefined") return;
+  try {
+    const u = new SpeechSynthesisUtterance("");
+    u.volume = 0;
+    speechSynthesis.speak(u);
+    speechSynthesis.cancel();
+  } catch (err) {
+    console.warn("[speech] no se pudo desbloquear el audio:", err);
+  }
+  speechPrimed = true;
+}
+
+function speakResponse(text) {
+  if (typeof speechSynthesis === "undefined") return;
+
+  speechSynthesis.cancel();
+  stopLipSync();
+
+  if (!text) return;
+
+  const utter = new SpeechSynthesisUtterance(text);
+  const voice = pickSpanishFemaleVoice();
+  if (voice) utter.voice = voice;
+  utter.lang = voice?.lang || "es-ES";
+  utter.rate = 1.0;
+  utter.pitch = 1.1;
+
+  utter.onstart = () => simulateLipSync();
+  utter.onend = () => stopLipSync();
+  utter.onerror = (event) => {
+    console.warn("[speech] error de síntesis:", event.error);
+    stopLipSync();
+  };
+
+  speechSynthesis.speak(utter);
 }
 
 function reactHappy(durationMs = 2000) {
@@ -272,6 +362,12 @@ async function handleUserMessage(text) {
   const trimmed = text.trim();
   if (!trimmed) return;
 
+  primeSpeech();
+  if (typeof speechSynthesis !== "undefined") {
+    speechSynthesis.cancel();
+  }
+  stopLipSync();
+
   appendMessage(trimmed, "user");
   chatInput.value = "";
 
@@ -285,7 +381,7 @@ async function handleUserMessage(text) {
       appendMessage(reply, "bot");
     }
     reactHappy(3000);
-    simulateLipSync(reply);
+    speakResponse(reply);
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
     const detail = error?.message ? ` (${error.message})` : "";
