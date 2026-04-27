@@ -5,6 +5,122 @@ import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
 const CHAT_ENDPOINT = "/chat";
 
+const AFFECT_STORAGE_KEY = "hina.affection.v1";
+const AFFECT_MIN = 0;
+const AFFECT_MAX = 100;
+const AFFECT_KIND_DELTA = 2;
+const AFFECT_INSULT_DELTA = -3;
+const AFFECT_DECAY_PER_MINUTE = 0.1;
+const AFFECT_DECAY_GRACE_MIN = 5;
+
+const KIND_WORDS = [
+  "gracias", "por favor", "te quiero", "te amo", "amor", "cariño", "carino",
+  "linda", "bonita", "hermosa", "preciosa", "encantadora", "guapa",
+  "eres genial", "increíble", "increible", "fantástica", "fantastica",
+  "perfecta", "buena chica", "querida", "mejor", "amiga", "te adoro",
+  "feliz", "buenos días", "buenos dias", "buenas noches",
+];
+
+const INSULT_WORDS = [
+  "tonta", "estupida", "estúpida", "idiota", "imbecil", "imbécil",
+  "fea", "inútil", "inutil", "mierda", "puta", "callate", "cállate",
+  "odio", "te odio", "basura", "mala", "fastidias", "jodete", "jódete",
+  "muerete", "muérete", "asco",
+];
+
+let affectionScore = 10;
+let affectionLastInteractionAt = Date.now();
+
+function clampAffection(n) {
+  if (!Number.isFinite(n)) return 10;
+  return Math.max(AFFECT_MIN, Math.min(AFFECT_MAX, Math.round(n * 100) / 100));
+}
+
+function loadAffection() {
+  try {
+    const raw = localStorage.getItem(AFFECT_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (Number.isFinite(parsed?.score)) {
+      affectionScore = clampAffection(parsed.score);
+    }
+    if (Number.isFinite(parsed?.lastInteractionAt)) {
+      affectionLastInteractionAt = parsed.lastInteractionAt;
+    }
+  } catch (err) {
+    console.warn("[affect] no se pudo leer almacenamiento:", err);
+  }
+}
+
+function persistAffection() {
+  try {
+    localStorage.setItem(
+      AFFECT_STORAGE_KEY,
+      JSON.stringify({
+        score: affectionScore,
+        lastInteractionAt: affectionLastInteractionAt,
+      }),
+    );
+  } catch (err) {
+    console.warn("[affect] no se pudo guardar:", err);
+  }
+}
+
+function applyInactivityDecay() {
+  const now = Date.now();
+  const minutesIdle = (now - affectionLastInteractionAt) / 60000;
+  if (minutesIdle <= AFFECT_DECAY_GRACE_MIN) return;
+
+  const decay = (minutesIdle - AFFECT_DECAY_GRACE_MIN) * AFFECT_DECAY_PER_MINUTE;
+  if (decay <= 0) return;
+
+  const before = affectionScore;
+  affectionScore = clampAffection(affectionScore - decay);
+  console.log(
+    `[affect] decay -${decay.toFixed(2)} tras ${minutesIdle.toFixed(1)} min inactivo (${before} → ${affectionScore})`,
+  );
+}
+
+function evaluateSentiment(text) {
+  const t = (text || "").toLowerCase();
+  let delta = 0;
+  let kindHit = null;
+  let insultHit = null;
+  for (const w of KIND_WORDS) {
+    if (t.includes(w)) { kindHit = w; delta += AFFECT_KIND_DELTA; break; }
+  }
+  for (const w of INSULT_WORDS) {
+    if (t.includes(w)) { insultHit = w; delta += AFFECT_INSULT_DELTA; break; }
+  }
+  return { delta, kindHit, insultHit };
+}
+
+function updateAffection(userText) {
+  applyInactivityDecay();
+  const { delta, kindHit, insultHit } = evaluateSentiment(userText);
+  if (delta !== 0) {
+    const before = affectionScore;
+    affectionScore = clampAffection(affectionScore + delta);
+    console.log(
+      `[affect] ${delta > 0 ? "+" : ""}${delta} (${kindHit || ""}${insultHit ? " / " + insultHit : ""}) → ${before} → ${affectionScore}`,
+    );
+  }
+  affectionLastInteractionAt = Date.now();
+  persistAffection();
+}
+
+function affectionLevel(score = affectionScore) {
+  if (score <= 25) return "low";
+  if (score <= 60) return "mid";
+  return "high";
+}
+
+loadAffection();
+applyInactivityDecay();
+console.log(
+  `[affect] inicio: score=${affectionScore} nivel=${affectionLevel()}`,
+);
+
 const info = document.getElementById("info");
 
 const scene = new THREE.Scene();
@@ -456,8 +572,16 @@ function reactHappy(durationMs = 2000) {
 }
 
 async function askGemini(userText) {
-  const requestBody = JSON.stringify({ message: userText });
-  console.log("Petición al servidor:", { url: CHAT_ENDPOINT, body: requestBody });
+  const requestBody = JSON.stringify({
+    message: userText,
+    affectionScore,
+  });
+  console.log("Petición al servidor:", {
+    url: CHAT_ENDPOINT,
+    affectionScore,
+    level: affectionLevel(),
+    body: requestBody,
+  });
 
   const response = await fetch(CHAT_ENDPOINT, {
     method: "POST",
@@ -510,6 +634,8 @@ async function handleUserMessage(text) {
   }
   stopLipSync();
 
+  updateAffection(trimmed);
+
   appendMessage(trimmed, "user");
   chatInput.value = "";
 
@@ -529,7 +655,8 @@ async function handleUserMessage(text) {
 
     let errorText;
     if (error?.status === 429) {
-      errorText = "¡Oye, vas muy rápido! Dame un respiro de 30 segundos.";
+      errorText =
+        "¡Cálmate, Víctor! Me aturdes con tantos mensajes, dame un respiro.";
     } else {
       const detail = error?.message ? ` (${error.message})` : "";
       errorText = `Hina tuvo un pequeño problema de conexión${detail}`;
