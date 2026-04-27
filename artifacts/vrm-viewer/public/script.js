@@ -288,7 +288,7 @@ const camera = new THREE.PerspectiveCamera(
   0.1,
   100,
 );
-camera.position.set(0, 1.4, 3);
+camera.position.set(0, 1.45, 1.2);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -311,9 +311,11 @@ const gridHelper = new THREE.GridHelper(10, 10, 0x444466, 0x222244);
 scene.add(gridHelper);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.2, 0);
+controls.target.set(0, 1.45, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.1;
+controls.minDistance = 0.6;
+controls.maxDistance = 3.0;
 controls.update();
 
 const clock = new THREE.Clock();
@@ -348,7 +350,7 @@ function captureRestPose(vrm) {
 function updateLookAtTargetFromPointer(clientX, clientY) {
   const x = (clientX / window.innerWidth) * 2 - 1;
   const y = -(clientY / window.innerHeight) * 2 + 1;
-  const headHeight = currentVrm ? controls.target.y : 1.4;
+  const headHeight = currentVrm ? controls.target.y : 1.45;
   lookAtTarget.position.set(x * 1.5, headHeight + y * 0.8, 2);
 }
 
@@ -396,15 +398,9 @@ loader.load(
 
     captureRestPose(vrm);
 
-    const box = new THREE.Box3().setFromObject(vrm.scene);
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-
-    const headY = center.y + size.y * 0.35;
-    controls.target.set(center.x, headY, center.z);
-
-    const distance = size.y * 1.6;
-    camera.position.set(center.x, headY, center.z + distance);
+    // Cámara fija "cara a cara" — la posición/target son los definidos arriba
+    // (camera.position 0,1.45,1.2 · target 0,1.45,0). No se ajusta al bbox del modelo
+    // para que Hina siempre quede mirándote a la altura del rostro al cargar.
     controls.update();
 
     if (info) info.textContent = "Hina lista · mueve el cursor";
@@ -544,6 +540,34 @@ const GESTURES = {
       if (hips && rest.hips) hips.position.y = bob;
       if (spine && rest.spine) {
         spine.rotation.x = rest.spine.x - 0.15 * k;
+      }
+    },
+  },
+  // FASE 6 · cansancio (bostezo) — brazo derecho a la boca + cabeza atrás
+  bostezar: {
+    duration: 3.6,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const head = vrm.humanoid?.getNormalizedBoneNode("head");
+      const neck = vrm.humanoid?.getNormalizedBoneNode("neck");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const rh = vrm.humanoid?.getNormalizedBoneNode("rightHand");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const rest = basePoseRest || {};
+      if (head && rest.head) head.rotation.x = rest.head.x - 0.35 * k;
+      if (neck && rest.neck) neck.rotation.x = rest.neck.x - 0.15 * k;
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 1.1 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.6 * k;
+      }
+      if (rl && rest.rightLowerArm) {
+        rl.rotation.x = rest.rightLowerArm.x - 1.6 * k;
+      }
+      if (rh && rest.rightHand) rh.rotation.z = rest.rightHand.z + 0.4 * k;
+      if (spine && rest.spine) spine.rotation.x = rest.spine.x - 0.1 * k;
+      if (vrm.expressionManager) {
+        vrm.expressionManager.setValue("aa", k);
       }
     },
   },
@@ -912,6 +936,241 @@ function detectGiftCommand(text) {
 }
 
 // =============================================================================
+// FASE 6 · CONTEXTO LOCAL DE PIURA (clima + hora) — Open-Meteo (sin API key)
+// =============================================================================
+
+const PIURA_LAT = -5.1945;
+const PIURA_LON = -80.6328;
+const PIURA_TZ = "America/Lima";
+const WEATHER_REFRESH_MS = 30 * 60 * 1000; // 30 min
+
+const WEATHER_CODE_ES = {
+  0: "despejado", 1: "casi despejado", 2: "parcialmente nublado", 3: "nublado",
+  45: "neblina", 48: "neblina con escarcha",
+  51: "llovizna ligera", 53: "llovizna", 55: "llovizna intensa",
+  61: "lluvia ligera", 63: "lluvia", 65: "lluvia fuerte",
+  66: "lluvia helada ligera", 67: "lluvia helada fuerte",
+  71: "nieve ligera", 73: "nieve", 75: "nieve intensa",
+  77: "granos de nieve",
+  80: "chubasco ligero", 81: "chubasco", 82: "chubasco fuerte",
+  85: "nevada ligera", 86: "nevada intensa",
+  95: "tormenta", 96: "tormenta con granizo ligero",
+  99: "tormenta con granizo fuerte",
+};
+
+let piuraContext = {
+  city: "Piura, Perú",
+  tempC: null,
+  conditionCode: null,
+  conditionEs: null,
+  fetchedAt: 0,
+};
+
+function piuraLocalDate() {
+  // Hora local de Lima (UTC-5) para que Hina sepa si es día/noche aunque
+  // el navegador esté en otra zona horaria.
+  return new Date(
+    new Date().toLocaleString("en-US", { timeZone: PIURA_TZ }),
+  );
+}
+
+function piuraDayPart() {
+  const h = piuraLocalDate().getHours();
+  if (h < 6) return "madrugada";
+  if (h < 12) return "mañana";
+  if (h < 19) return "tarde";
+  return "noche";
+}
+
+async function fetchPiuraWeather() {
+  if (Date.now() - piuraContext.fetchedAt < WEATHER_REFRESH_MS) return;
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${PIURA_LAT}` +
+      `&longitude=${PIURA_LON}&current=temperature_2m,weather_code` +
+      `&timezone=${encodeURIComponent(PIURA_TZ)}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const t = d?.current?.temperature_2m;
+    const code = d?.current?.weather_code;
+    if (Number.isFinite(t)) piuraContext.tempC = Math.round(t * 10) / 10;
+    if (Number.isFinite(code)) {
+      piuraContext.conditionCode = code;
+      piuraContext.conditionEs = WEATHER_CODE_ES[code] || "clima estable";
+    }
+    piuraContext.fetchedAt = Date.now();
+    console.log("[piura] clima:", piuraContext);
+  } catch (err) {
+    console.warn("[piura] no se pudo leer el clima:", err.message);
+    // simulamos un fallback razonable para Piura (cálido/seco)
+    piuraContext.tempC = piuraContext.tempC ?? 26;
+    piuraContext.conditionEs = piuraContext.conditionEs ?? "cálido";
+    piuraContext.fetchedAt = Date.now();
+  }
+}
+
+function buildLocalContext() {
+  const d = piuraLocalDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return {
+    city: piuraContext.city,
+    timezone: PIURA_TZ,
+    localTime: `${hh}:${mm}`,
+    dayPart: piuraDayPart(),
+    weekday: d.toLocaleDateString("es-PE", { weekday: "long" }),
+    tempC: piuraContext.tempC,
+    weather: piuraContext.conditionEs,
+    energy: energyLevel,
+  };
+}
+
+// arrancamos la consulta pronto para tenerla lista al primer mensaje
+fetchPiuraWeather();
+window.setInterval(fetchPiuraWeather, WEATHER_REFRESH_MS);
+
+// =============================================================================
+// FASE 6 · SISTEMA DE VITALIDAD (energyLevel + sugerencia de descanso)
+// =============================================================================
+
+const ENERGY_STORAGE_KEY = "hina.energy.v1";
+const ENERGY_MAX = 100;
+const ENERGY_MIN = 0;
+const ENERGY_DECAY_PER_MSG = 1.2;       // cae con cada turno
+const ENERGY_RECOVER_PER_MIN = 0.6;     // recupera con descanso (idle)
+const ENERGY_TIRED_THRESHOLD = 35;
+const ENERGY_EXHAUSTED_THRESHOLD = 15;
+const ENERGY_YAWN_COOLDOWN_MS = 90 * 1000;
+
+let energyLevel = ENERGY_MAX;
+let energyLastUpdateAt = Date.now();
+let lastYawnAt = 0;
+let lastRestSuggestionAt = 0;
+
+function loadEnergy() {
+  try {
+    const raw = localStorage.getItem(ENERGY_STORAGE_KEY);
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    if (Number.isFinite(p?.energy)) energyLevel = clampEnergy(p.energy);
+    if (Number.isFinite(p?.lastUpdateAt)) energyLastUpdateAt = p.lastUpdateAt;
+  } catch (err) {
+    console.warn("[energy] no se pudo leer:", err);
+  }
+}
+function persistEnergy() {
+  try {
+    localStorage.setItem(
+      ENERGY_STORAGE_KEY,
+      JSON.stringify({ energy: energyLevel, lastUpdateAt: energyLastUpdateAt }),
+    );
+  } catch (err) {
+    console.warn("[energy] no se pudo guardar:", err);
+  }
+}
+function clampEnergy(n) {
+  if (!Number.isFinite(n)) return ENERGY_MAX;
+  return Math.max(ENERGY_MIN, Math.min(ENERGY_MAX, Math.round(n * 100) / 100));
+}
+function recoverEnergyByIdle() {
+  const idleMin = (Date.now() - energyLastUpdateAt) / 60000;
+  if (idleMin <= 0) return;
+  energyLevel = clampEnergy(energyLevel + idleMin * ENERGY_RECOVER_PER_MIN);
+  energyLastUpdateAt = Date.now();
+}
+function consumeEnergyForMessage() {
+  recoverEnergyByIdle();
+  energyLevel = clampEnergy(energyLevel - ENERGY_DECAY_PER_MSG);
+  energyLastUpdateAt = Date.now();
+  persistEnergy();
+  console.log(`[energy] nivel=${energyLevel.toFixed(1)}`);
+}
+function maybeYawnIfTired() {
+  if (energyLevel >= ENERGY_TIRED_THRESHOLD) return false;
+  if (activeGesture) return false;
+  if (Date.now() - lastYawnAt < ENERGY_YAWN_COOLDOWN_MS) return false;
+  lastYawnAt = Date.now();
+  playGesture("bostezar");
+  return true;
+}
+function buildRestSuggestion() {
+  if (energyLevel >= ENERGY_TIRED_THRESHOLD) return "";
+  if (Date.now() - lastRestSuggestionAt < 5 * 60 * 1000) return "";
+  lastRestSuggestionAt = Date.now();
+  if (energyLevel <= ENERGY_EXHAUSTED_THRESHOLD) {
+    return "Estoy agotada… deberíamos parar un rato. Toma agua y descansa.";
+  }
+  return "Llevamos rato hablando. Si quieres seguimos en un momento, ¿sí?";
+}
+
+loadEnergy();
+recoverEnergyByIdle();
+console.log(`[energy] inicio: nivel=${energyLevel.toFixed(1)}`);
+
+// =============================================================================
+// FASE 6 · /musica — reproductor Lofi (YouTube embed)
+// =============================================================================
+
+const LOFI_PLAYLISTS = [
+  {
+    id: "jfKfPfyJRdk",
+    title: "Lofi Girl · beats to relax/study",
+  },
+  {
+    id: "rUxyKA_-grg",
+    title: "Lofi Girl · sleepy beats",
+  },
+];
+
+function getMusicOverlay() {
+  return document.getElementById("music-overlay");
+}
+
+function openMusicOverlay(query = "") {
+  const overlay = getMusicOverlay();
+  if (!overlay) return;
+  // Permitir /musica <id-de-youtube> o /musica <título>
+  let track = LOFI_PLAYLISTS[0];
+  const q = (query || "").trim().toLowerCase();
+  if (q) {
+    if (/^[\w-]{8,15}$/.test(q)) {
+      track = { id: q, title: `Pista personalizada (${q})` };
+    } else {
+      const found = LOFI_PLAYLISTS.find((p) =>
+        p.title.toLowerCase().includes(q),
+      );
+      if (found) track = found;
+    }
+  }
+  const iframe = document.getElementById("music-iframe");
+  const titleEl = document.getElementById("music-title");
+  if (iframe) {
+    iframe.src =
+      `https://www.youtube.com/embed/${track.id}` +
+      `?autoplay=1&rel=0&modestbranding=1`;
+  }
+  if (titleEl) titleEl.textContent = track.title;
+  overlay.classList.add("visible");
+}
+
+function closeMusicOverlay() {
+  const overlay = getMusicOverlay();
+  if (!overlay) return;
+  const iframe = document.getElementById("music-iframe");
+  if (iframe) iframe.src = "";
+  overlay.classList.remove("visible");
+}
+
+function detectMusicCommand(text) {
+  const m = /^\/musica\b\s*(.*)$/i.exec(text.trim());
+  if (!m) return null;
+  const arg = m[1].trim();
+  if (/^(off|stop|cerrar|cierra|apagar)$/i.test(arg)) return { action: "off" };
+  return { action: "on", query: arg };
+}
+
+// =============================================================================
 // FASE 3 · ADJUNTOS (cámara, archivos, audio)
 // =============================================================================
 
@@ -970,7 +1229,8 @@ function totalAttachedBytes() {
   return pendingAttachments.reduce((acc, a) => acc + (a.size || 0), 0);
 }
 
-async function addFilesToAttachments(filesList) {
+async function addFilesToAttachments(filesList, opts = {}) {
+  const fromCamera = Boolean(opts.fromCamera);
   for (const file of filesList) {
     if (!file) continue;
     if (totalAttachedBytes() + file.size > MAX_TOTAL_BYTES) {
@@ -987,6 +1247,7 @@ async function addFilesToAttachments(filesList) {
         mime: file.type || "application/octet-stream",
         size: file.size || 0,
         base64,
+        fromCamera,
       };
       if (att.mime.startsWith("image/")) {
         att.previewUrl = `data:${att.mime};base64,${base64}`;
@@ -1008,7 +1269,8 @@ if (cameraBtn && cameraInput) {
   cameraInput.addEventListener("change", async (event) => {
     const files = event.target.files;
     if (!files || !files.length) return;
-    await addFilesToAttachments(files);
+    // FASE 6 · marcamos los archivos venidos de la cámara para empatía visual
+    await addFilesToAttachments(files, { fromCamera: true });
   });
 }
 
@@ -1024,12 +1286,110 @@ if (fileBtn && fileInput) {
   });
 }
 
-// Audio recording (mic button)
+// =============================================================================
+// FASE 6 · ESCUCHA ACTIVA — Web Speech API (con fallback a grabación de audio)
+// =============================================================================
+//
+// Tap mic → Hina escucha por voz, transcribe y envía el texto automáticamente.
+// Si el navegador no soporta SpeechRecognition (Safari sin habilitar, Firefox)
+// volvemos a la grabación tipo MediaRecorder y la mandamos como adjunto.
+
+const SpeechRecognitionImpl =
+  window.SpeechRecognition || window.webkitSpeechRecognition || null;
+
+let speechRecognition = null;
+let speechRecognizing = false;
+let speechFinalTranscript = "";
+
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStream = null;
 
-async function startRecording() {
+function setMicListeningUi(on) {
+  if (!micBtn) return;
+  micBtn.classList.toggle("recording", on);
+  micBtn.setAttribute(
+    "aria-label",
+    on ? "Detener escucha" : "Hablar con Hina (dictado por voz)",
+  );
+  micBtn.setAttribute(
+    "title",
+    on ? "Detener escucha" : "Hablar (Web Speech API)",
+  );
+}
+
+function startSpeechRecognition() {
+  if (!SpeechRecognitionImpl) return false;
+  if (speechRecognizing) return true;
+  try {
+    speechRecognition = new SpeechRecognitionImpl();
+  } catch (err) {
+    console.warn("[voz] no se pudo crear SpeechRecognition:", err);
+    return false;
+  }
+  speechRecognition.lang = "es-PE";
+  speechRecognition.interimResults = true;
+  speechRecognition.continuous = false;
+  speechRecognition.maxAlternatives = 1;
+  speechFinalTranscript = "";
+
+  speechRecognition.onstart = () => {
+    speechRecognizing = true;
+    setMicListeningUi(true);
+    if (chatInput) chatInput.placeholder = "Escuchándote…";
+  };
+  speechRecognition.onresult = (event) => {
+    let interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const r = event.results[i];
+      if (r.isFinal) speechFinalTranscript += r[0].transcript;
+      else interim += r[0].transcript;
+    }
+    if (chatInput) {
+      chatInput.value = (speechFinalTranscript + interim).trim();
+    }
+  };
+  speechRecognition.onerror = (event) => {
+    console.warn("[voz] error:", event.error);
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      appendMessage(
+        "No me diste permiso para usar el micrófono.",
+        "system",
+      );
+    } else if (event.error === "no-speech") {
+      appendMessage("No escuché nada. Intenta de nuevo.", "system");
+    }
+  };
+  speechRecognition.onend = () => {
+    speechRecognizing = false;
+    setMicListeningUi(false);
+    if (chatInput) chatInput.placeholder = "Escribe un mensaje…";
+    const text = speechFinalTranscript.trim();
+    speechFinalTranscript = "";
+    if (text.length > 0) {
+      // Auto-envío del texto reconocido (manos libres)
+      handleUserMessage(text);
+    }
+  };
+  try {
+    speechRecognition.start();
+    return true;
+  } catch (err) {
+    console.warn("[voz] start falló:", err);
+    speechRecognizing = false;
+    setMicListeningUi(false);
+    return false;
+  }
+}
+
+function stopSpeechRecognition() {
+  if (speechRecognition && speechRecognizing) {
+    try { speechRecognition.stop(); } catch {}
+  }
+}
+
+// Fallback: grabación clásica si el navegador no soporta SpeechRecognition
+async function startRecordingFallback() {
   if (mediaRecorder && mediaRecorder.state === "recording") return;
   if (!navigator.mediaDevices?.getUserMedia) {
     appendMessage("Tu navegador no permite grabar audio.", "system");
@@ -1070,23 +1430,35 @@ async function startRecording() {
     await addFilesToAttachments([file]);
   };
   mediaRecorder.start();
-  micBtn?.classList.add("recording");
-  micBtn?.setAttribute("aria-label", "Detener grabación");
+  setMicListeningUi(true);
 }
 
-function stopRecording() {
+function stopRecordingFallback() {
   if (mediaRecorder && mediaRecorder.state === "recording") {
     mediaRecorder.stop();
   }
-  micBtn?.classList.remove("recording");
-  micBtn?.setAttribute("aria-label", "Grabar audio");
+  setMicListeningUi(false);
 }
 
 if (micBtn) {
   micBtn.addEventListener("click", () => {
-    if (mediaRecorder && mediaRecorder.state === "recording") stopRecording();
-    else startRecording();
+    if (SpeechRecognitionImpl) {
+      if (speechRecognizing) stopSpeechRecognition();
+      else startSpeechRecognition();
+    } else {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        stopRecordingFallback();
+      } else {
+        startRecordingFallback();
+      }
+    }
   });
+  if (!SpeechRecognitionImpl) {
+    micBtn.setAttribute(
+      "title",
+      "Tu navegador no soporta dictado: se grabará un mensaje de voz",
+    );
+  }
 }
 
 // =============================================================================
@@ -1131,6 +1503,7 @@ async function askGemini(userText) {
     affectionScore,
     history: chatHistory.slice(-HISTORY_WINDOW),
     memory: distilledMemoryForServer(),
+    context: buildLocalContext(),
   };
   try {
     return await postChatOnce(payload);
@@ -1144,10 +1517,15 @@ async function askGemini(userText) {
 }
 
 async function analyzeWithFiles(userText, attachments) {
+  const cameraEmpathy = attachments.some(
+    (a) => a.fromCamera && (a.mime || "").startsWith("image/"),
+  );
   const payload = {
     message: userText,
     affectionScore,
     memory: distilledMemoryForServer(),
+    context: buildLocalContext(),
+    cameraEmpathy,
     files: attachments.map((a) => ({
       name: a.name,
       mime: a.mime,
@@ -1223,6 +1601,29 @@ async function handleUserMessage(text) {
   if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
   stopLipSync();
 
+  // FASE 6 · /musica — totalmente local, no toca a Gemini
+  const music = detectMusicCommand(trimmed);
+  if (music && pendingAttachments.length === 0) {
+    appendMessage(trimmed, "user");
+    chatInput.value = "";
+    if (music.action === "off") {
+      closeMusicOverlay();
+      const r = "Apagué la música. Sigamos.";
+      appendMessage(r, "bot");
+      pushHistory("model", r);
+      speakResponse(r);
+    } else {
+      openMusicOverlay(music.query);
+      const r = music.query
+        ? `Pongo "${music.query}" para acompañarte.`
+        : "Pongo lofi para estudiar. Tú concéntrate, yo te acompaño.";
+      appendMessage(r, "bot");
+      pushHistory("model", r);
+      speakResponse(r);
+    }
+    return;
+  }
+
   const attachments = pendingAttachments.splice(0, pendingAttachments.length);
   renderAttachmentChips();
 
@@ -1286,16 +1687,26 @@ async function handleUserMessage(text) {
     return;
   }
 
+  // FASE 6 · vitalidad: cada turno que va a Gemini consume energía
+  consumeEnergyForMessage();
+
   const thinkingBubble = appendMessage("Hina está pensando…", "bot");
 
   try {
-    const reply = attachments.length
+    const replyRaw = attachments.length
       ? await analyzeWithFiles(trimmed, attachments)
       : await askGemini(trimmed);
+
+    // Si está cansada, agrega una sugerencia de descanso y bosteza
+    let reply = replyRaw;
+    const restHint = buildRestSuggestion();
+    if (restHint) reply = `${replyRaw}\n\n${restHint}`;
+    const yawned = maybeYawnIfTired();
+
     if (thinkingBubble) setBubbleText(thinkingBubble, reply);
     else appendMessage(reply, "bot");
     pushHistory("model", reply);
-    reactHappy(3000);
+    if (!yawned) reactHappy(3000);
     speakResponse(reply);
 
     if (memory.totalUserMessages % SUMMARY_EVERY_N_USER_MSGS === 0) {
@@ -1471,6 +1882,12 @@ async function bootstrapAuth() {
     persistAuth(null);
     showLockOverlay();
   }
+}
+
+// FASE 6 · botón de cierre del reproductor
+const musicCloseBtn = document.getElementById("music-close");
+if (musicCloseBtn) {
+  musicCloseBtn.addEventListener("click", () => closeMusicOverlay());
 }
 
 bootstrapAuth();

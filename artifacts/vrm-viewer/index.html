@@ -406,6 +406,67 @@
         font-size: 13px;
         opacity: 0.7;
       }
+
+      /* FASE 6 · reproductor de música (lofi) */
+      #music-overlay {
+        position: fixed;
+        right: 16px;
+        bottom: 110px;
+        width: min(360px, 92vw);
+        z-index: 90;
+        background: rgba(15, 15, 30, 0.92);
+        backdrop-filter: blur(14px) saturate(160%);
+        -webkit-backdrop-filter: blur(14px) saturate(160%);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 16px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+        padding: 10px 12px 12px;
+        color: #fff;
+        display: none;
+        flex-direction: column;
+        gap: 8px;
+      }
+      #music-overlay.visible {
+        display: flex;
+      }
+      .music-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .music-title {
+        font-size: 13px;
+        font-weight: 600;
+        opacity: 0.9;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .music-close {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        line-height: 1;
+      }
+      #music-iframe {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        border: 0;
+        border-radius: 10px;
+        background: #000;
+      }
+      .music-hint {
+        font-size: 11px;
+        opacity: 0.6;
+        text-align: center;
+      }
     </style>
     <script type="importmap">
       {
@@ -486,6 +547,20 @@
           ➤
         </button>
       </form>
+    </div>
+
+    <div id="music-overlay" role="region" aria-label="Reproductor de música">
+      <div class="music-head">
+        <div class="music-title" id="music-title">Lofi · Study music</div>
+        <button type="button" class="music-close" id="music-close" aria-label="Cerrar reproductor">×</button>
+      </div>
+      <iframe
+        id="music-iframe"
+        title="Reproductor de música"
+        allow="autoplay; encrypted-media; picture-in-picture"
+        allowfullscreen
+      ></iframe>
+      <div class="music-hint">Comando: /musica · /musica off</div>
     </div>
 
     <input type="file" id="camera-input" accept="image/*" capture="environment" hidden />

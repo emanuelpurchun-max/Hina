@@ -58,7 +58,50 @@ function pickLevel(rawScore) {
   return "girlfriend";
 }
 
-function buildSystemPrompt(level, memory) {
+function buildContextBlock(context) {
+  if (!context || typeof context !== "object") return "";
+  const lines = [];
+  if (context.city) lines.push(`- Ciudad: ${context.city}`);
+  if (context.localTime) {
+    const wd = context.weekday ? `, ${context.weekday}` : "";
+    lines.push(`- Hora local${wd}: ${context.localTime} (${context.dayPart || "día"})`);
+  }
+  if (Number.isFinite(context.tempC)) {
+    const w = context.weather ? `, ${context.weather}` : "";
+    lines.push(`- Clima ahora: ${context.tempC}°C${w}`);
+  } else if (context.weather) {
+    lines.push(`- Clima: ${context.weather}`);
+  }
+  if (Number.isFinite(context.energy)) {
+    let estado = "descansada";
+    if (context.energy < 15) estado = "agotada";
+    else if (context.energy < 35) estado = "cansada";
+    else if (context.energy < 60) estado = "algo cansada";
+    lines.push(`- Tu vitalidad ahora: ${Math.round(context.energy)}/100 (${estado})`);
+  }
+  if (!lines.length) return "";
+  return [
+    "CONTEXTO REAL (úsalo SIEMPRE de forma natural, sin repetirlo entero):",
+    ...lines,
+    "Reglas:",
+    "- Si es 'noche' o 'madrugada' saluda en consecuencia (buenas noches, etc).",
+    "- Comenta el clima de Piura SOLO si encaja (ej: hace calor → invita a tomar agua).",
+    "- Si tu vitalidad está 'cansada' o peor, deja entrever cansancio en 1 frase.",
+  ].join("\n");
+}
+
+function buildEmpathyBlock(cameraEmpathy) {
+  if (!cameraEmpathy) return "";
+  return [
+    "EMPATÍA VISUAL ACTIVA: el usuario te envió una foto desde su cámara.",
+    "Antes de responder, intenta describir mentalmente qué ves de su rostro/postura/entorno",
+    "y deduce su estado de ánimo (feliz, triste, cansado, estresado, neutral).",
+    "Adapta tu respuesta a ese estado. NO digas 'detecté que…': solo responde con calidez",
+    "acorde al ánimo. Si parece triste o cansado, ofrece compañía y un comentario amable.",
+  ].join(" ");
+}
+
+function buildSystemPrompt(level, memory, context, cameraEmpathy) {
   const profile = memory?.profile || {};
   const summaries = Array.isArray(memory?.summaries)
     ? memory.summaries.slice(-3)
@@ -89,7 +132,14 @@ function buildSystemPrompt(level, memory) {
       ? `Nota interna: en el pasado llegaron al nivel "${highestLevel}". Tenlo en cuenta sutilmente.`
       : "";
 
-  return [personality, profileBlock, memoryBlock, peakBlock]
+  return [
+    personality,
+    profileBlock,
+    memoryBlock,
+    peakBlock,
+    buildContextBlock(context),
+    buildEmpathyBlock(cameraEmpathy),
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -313,8 +363,9 @@ export function createApiApp() {
     const affectionScore = Number(req.body?.affectionScore);
     const level = pickLevel(affectionScore);
     const memory = req.body?.memory || {};
+    const context = req.body?.context || null;
     const historyContents = sanitizeHistory(req.body?.history);
-    const systemInstruction = buildSystemPrompt(level, memory);
+    const systemInstruction = buildSystemPrompt(level, memory, context, false);
 
     console.log("--- /chat ---", {
       msg: message.slice(0, 60),
@@ -322,6 +373,9 @@ export function createApiApp() {
       level,
       historyLen: historyContents.length,
       summaries: memory?.summaries?.length || 0,
+      ctx: context
+        ? { time: context.localTime, temp: context.tempC, energy: context.energy }
+        : null,
     });
 
     try {
@@ -382,7 +436,14 @@ export function createApiApp() {
     const affectionScore = Number(req.body?.affectionScore);
     const level = pickLevel(affectionScore);
     const memory = req.body?.memory || {};
-    const systemInstruction = buildSystemPrompt(level, memory);
+    const context = req.body?.context || null;
+    const cameraEmpathy = Boolean(req.body?.cameraEmpathy);
+    const systemInstruction = buildSystemPrompt(
+      level,
+      memory,
+      context,
+      cameraEmpathy,
+    );
 
     let parts;
     try {
