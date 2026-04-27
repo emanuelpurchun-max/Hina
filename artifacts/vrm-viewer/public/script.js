@@ -266,39 +266,92 @@ let speechPrimed = false;
 function primeSpeech() {
   if (speechPrimed || typeof speechSynthesis === "undefined") return;
   try {
-    const u = new SpeechSynthesisUtterance("");
-    u.volume = 0;
-    speechSynthesis.speak(u);
     speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    u.rate = 1;
+    speechSynthesis.speak(u);
+    console.log("[speech] audio desbloqueado");
   } catch (err) {
     console.warn("[speech] no se pudo desbloquear el audio:", err);
   }
   speechPrimed = true;
 }
 
+function doSpeak(text) {
+  const voices = speechSynthesis.getVoices() || [];
+  console.log("Voces disponibles:", voices.length);
+  cachedVoices = voices;
+
+  const voice = pickSpanishFemaleVoice();
+  console.log(
+    "[speech] voz elegida:",
+    voice ? `${voice.name} (${voice.lang})` : "ninguna (default del navegador)",
+  );
+
+  const utter = new SpeechSynthesisUtterance(text);
+  if (voice) utter.voice = voice;
+  utter.lang = voice?.lang || "es-ES";
+  utter.rate = 1.0;
+  utter.pitch = 1.1;
+
+  utter.onstart = () => {
+    console.log("[speech] onstart — arrancando lip-sync");
+    simulateLipSync();
+  };
+  utter.onend = () => {
+    console.log("[speech] onend");
+    stopLipSync();
+  };
+  utter.onerror = (event) => {
+    console.warn("[speech] onerror:", event.error);
+    stopLipSync();
+  };
+
+  speechSynthesis.speak(utter);
+}
+
 function speakResponse(text) {
-  if (typeof speechSynthesis === "undefined") return;
+  console.log("--- Intentando hablar ---", text?.slice(0, 60));
+
+  if (typeof speechSynthesis === "undefined") {
+    console.warn("[speech] Web Speech API no disponible en este navegador");
+    return;
+  }
 
   speechSynthesis.cancel();
   stopLipSync();
 
   if (!text) return;
 
-  const utter = new SpeechSynthesisUtterance(text);
-  const voice = pickSpanishFemaleVoice();
-  if (voice) utter.voice = voice;
-  utter.lang = voice?.lang || "es-ES";
-  utter.rate = 1.0;
-  utter.pitch = 1.1;
+  const voices = speechSynthesis.getVoices() || [];
+  if (voices.length === 0) {
+    console.log(
+      "[speech] lista de voces vacía, esperando 'voiceschanged'…",
+    );
 
-  utter.onstart = () => simulateLipSync();
-  utter.onend = () => stopLipSync();
-  utter.onerror = (event) => {
-    console.warn("[speech] error de síntesis:", event.error);
-    stopLipSync();
-  };
+    let fired = false;
+    const onVoices = () => {
+      if (fired) return;
+      fired = true;
+      speechSynthesis.removeEventListener?.("voiceschanged", onVoices);
+      doSpeak(text);
+    };
+    speechSynthesis.addEventListener?.("voiceschanged", onVoices);
 
-  speechSynthesis.speak(utter);
+    window.setTimeout(() => {
+      if (fired) return;
+      fired = true;
+      speechSynthesis.removeEventListener?.("voiceschanged", onVoices);
+      console.warn(
+        "[speech] 'voiceschanged' no llegó tras 1.5s, hablo igualmente",
+      );
+      doSpeak(text);
+    }, 1500);
+    return;
+  }
+
+  doSpeak(text);
 }
 
 function reactHappy(durationMs = 2000) {
@@ -409,6 +462,40 @@ if (chatInput) {
     }
   });
 }
+
+const startOverlay = document.getElementById("start-overlay");
+
+function dismissStartOverlay() {
+  primeSpeech();
+  if (startOverlay) {
+    startOverlay.classList.add("hidden");
+    window.setTimeout(() => startOverlay.remove(), 500);
+  }
+}
+
+if (startOverlay) {
+  const handleStart = (event) => {
+    event.preventDefault();
+    dismissStartOverlay();
+  };
+  startOverlay.addEventListener("pointerdown", handleStart, { once: true });
+  startOverlay.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        dismissStartOverlay();
+      }
+    },
+    { once: true },
+  );
+}
+
+const unlockOnFirstTouch = () => {
+  primeSpeech();
+};
+window.addEventListener("pointerdown", unlockOnFirstTouch, { once: true });
+window.addEventListener("keydown", unlockOnFirstTouch, { once: true });
 
 function animate() {
   requestAnimationFrame(animate);

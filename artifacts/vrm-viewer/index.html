@@ -181,6 +181,44 @@
           font-size: 14px;
         }
       }
+
+      #start-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 15, 30, 0.55);
+        backdrop-filter: blur(10px) saturate(140%);
+        -webkit-backdrop-filter: blur(10px) saturate(140%);
+        cursor: pointer;
+        transition: opacity 0.4s ease;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+      }
+      #start-overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .start-overlay-card {
+        text-align: center;
+        padding: 28px 40px;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+      }
+      .start-overlay-title {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      .start-overlay-hint {
+        margin-top: 6px;
+        font-size: 13px;
+        opacity: 0.7;
+      }
     </style>
     <script type="importmap">
       {
@@ -193,6 +231,13 @@
     </script>
   </head>
   <body>
+    <div id="start-overlay" role="button" tabindex="0" aria-label="Toca para iniciar a Hina">
+      <div class="start-overlay-card">
+        <div class="start-overlay-title">Toca para iniciar a Hina</div>
+        <div class="start-overlay-hint">Activa el audio de la conversación</div>
+      </div>
+    </div>
+
     <div id="info">Cargando personaje.vrm…</div>
 
     <div id="chat-container">
