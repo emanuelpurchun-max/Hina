@@ -458,7 +458,13 @@ function pickInitialOutfit() {
   // 2) por hora de Piura
   const h = piuraLocalDate().getHours();
   if (h >= 22 || h < 6) return "pijama";
-  // 3) casual aleatorio
+  // 3) por calor: si arriba de 30°C, 50% de probabilidad de subir a sexy/cosplay
+  const temp = piuraContext?.tempC;
+  if (Number.isFinite(temp) && temp > 30 && Math.random() < 0.5) {
+    const hot = ["sexy1", "sexy2", "cosplay"];
+    return hot[Math.floor(Math.random() * hot.length)];
+  }
+  // 4) casual aleatorio (rotación 1/2/3)
   const casuals = ["casual1", "casual2", "casual3"];
   return casuals[Math.floor(Math.random() * casuals.length)];
 }
@@ -484,12 +490,174 @@ function disposeVrm(vrm) {
   VRMUtils.deepDispose?.(vrm.scene);
 }
 
+// FASE 7+ · pose canónica de Hina (A-pose natural).
+// Se aplica a TODOS los modelos al cargar para eliminar la T-pose por completo.
+// Cualquier outfit hereda la misma postura de descanso, así Hina siempre se ve
+// como Hina, sin importar qué ropa lleve.
+const HINA_REST_POSE = {
+  // tronco
+  hips:           { x: 0,     y: 0,     z: 0     },
+  spine:          { x: 0.04,  y: 0,     z: 0     },
+  chest:          { x: 0.02,  y: 0,     z: 0     },
+  upperChest:     { x: 0,     y: 0,     z: 0     },
+  neck:           { x: 0.02,  y: 0,     z: 0     },
+  head:           { x: 0,     y: 0,     z: 0     },
+  // brazos en A-pose suave
+  leftShoulder:   { x: 0,     y: 0,     z: 0.05  },
+  rightShoulder:  { x: 0,     y: 0,    z: -0.05  },
+  leftUpperArm:   { x: 0.05,  y: 0,     z: 1.222 }, // ≈ 70°
+  rightUpperArm:  { x: 0.05,  y: 0,    z: -1.222 },
+  leftLowerArm:   { x: 0,     y: 0.18,  z: 0     },
+  rightLowerArm:  { x: 0,     y: -0.18, z: 0     },
+  leftHand:       { x: 0,     y: 0,     z: -0.05 },
+  rightHand:      { x: 0,     y: 0,     z: 0.05  },
+  // piernas relajadas
+  leftUpperLeg:   { x: 0,     y: 0,     z: 0     },
+  rightUpperLeg:  { x: 0,     y: 0,     z: 0     },
+  leftLowerLeg:   { x: 0.02,  y: 0,     z: 0     },
+  rightLowerLeg:  { x: 0.02,  y: 0,     z: 0     },
+  leftFoot:       { x: 0,     y: 0,     z: 0     },
+  rightFoot:      { x: 0,     y: 0,     z: 0     },
+};
+
+function normalizeToHinaPose(vrm) {
+  if (!vrm.humanoid) return;
+  // 1) reset duro: vuelve TODOS los huesos humanoides a rotación 0 (T-pose nativa)
+  if (typeof vrm.humanoid.resetNormalizedPose === "function") {
+    vrm.humanoid.resetNormalizedPose();
+  } else if (typeof vrm.humanoid.resetPose === "function") {
+    vrm.humanoid.resetPose();
+  }
+  // 2) aplica la A-pose canónica de Hina hueso por hueso
+  for (const [boneName, rot] of Object.entries(HINA_REST_POSE)) {
+    const node = vrm.humanoid.getNormalizedBoneNode(boneName);
+    if (!node) continue;
+    node.rotation.x = rot.x;
+    node.rotation.y = rot.y;
+    node.rotation.z = rot.z;
+  }
+}
+
+// alias retrocompatible: cualquier llamada vieja sigue funcionando
 function applyDefaultRestPose(vrm) {
-  // brazos abajo (tipo "A pose" cómoda)
-  const leftUpperArm = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
-  const rightUpperArm = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
-  if (leftUpperArm) leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
-  if (rightUpperArm) rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
+  normalizeToHinaPose(vrm);
+}
+
+// =============================================================================
+// FASE 7+ · INTERCAMBIO UNIVERSAL DE TEXTURAS (préstamo de ropa)
+// =============================================================================
+//
+// Permite que el modelo activo "tome prestada" la textura de ropa de cualquier
+// otro modelo del armario sin cambiar de estructura. Funciona porque los VRoid
+// nombran sus materiales con sufijos consistentes (Tops/Bottoms/Onepiece/etc).
+const CLOTH_KEYWORDS = [
+  "tops", "bottoms", "onepiece", "outerwear", "footwear",
+  "skirt", "dress", "cloth", "swimwear", "underwear",
+];
+
+function isClothMaterial(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return CLOTH_KEYWORDS.some((k) => lower.includes(k));
+}
+
+function extractClothTextures(vrm) {
+  const out = [];
+  const seen = new Set();
+  vrm.scene.traverse((obj) => {
+    if (!obj.material) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of mats) {
+      if (!m.name || seen.has(m.name)) continue;
+      if (!isClothMaterial(m.name)) continue;
+      if (!m.map) continue;
+      seen.add(m.name);
+      out.push({
+        materialName: m.name,
+        texture: m.map,
+        color: m.color?.clone?.(),
+      });
+    }
+  });
+  return out;
+}
+
+function applyClothTextures(vrm, source) {
+  if (!source || !source.length) return 0;
+  let count = 0;
+  vrm.scene.traverse((obj) => {
+    if (!obj.material) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const m of mats) {
+      if (!m.name || !m.map) continue;
+      // 1) match exacto por nombre de material
+      let pick = source.find((s) => s.materialName === m.name);
+      // 2) fallback por categoría (Tops, Bottoms, etc.)
+      if (!pick) {
+        const cat = CLOTH_KEYWORDS.find((k) =>
+          m.name.toLowerCase().includes(k),
+        );
+        if (cat) {
+          pick = source.find((s) =>
+            s.materialName.toLowerCase().includes(cat),
+          );
+        }
+      }
+      if (pick) {
+        m.map = pick.texture;
+        if (m.color && pick.color) m.color.copy(pick.color);
+        m.needsUpdate = true;
+        count += 1;
+      }
+    }
+  });
+  return count;
+}
+
+let isBorrowingTexture = false;
+async function borrowTexturesFrom(sourceName) {
+  if (!currentVrm) return false;
+  const def = WARDROBE[sourceName];
+  if (!def) return false;
+  if (isBorrowingTexture) return false;
+  isBorrowingTexture = true;
+  showLoadBar(`Tomando prestada la ropa de ${def.label}…`);
+  return new Promise((resolve) => {
+    loader.load(
+      def.path,
+      (gltf) => {
+        const sourceVrm = gltf.userData.vrm;
+        const tex = extractClothTextures(sourceVrm);
+        const applied = applyClothTextures(currentVrm, tex);
+        // limpieza: dispone TODO menos las texturas que se quedaron prestadas
+        const keepers = new Set(tex.map((t) => t.texture.uuid));
+        sourceVrm.scene.traverse((obj) => {
+          if (obj.geometry) obj.geometry.dispose?.();
+          if (!obj.material) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            for (const k of Object.keys(m)) {
+              const v = m[k];
+              if (v && v.isTexture && !keepers.has(v.uuid)) v.dispose();
+            }
+            m.dispose?.();
+          }
+        });
+        VRMUtils.deepDispose?.(sourceVrm.scene);
+        hideLoadBar(400);
+        isBorrowingTexture = false;
+        console.log(`[texture-swap] aplicadas ${applied} texturas de ${sourceName}`);
+        resolve(applied > 0);
+      },
+      (p) => updateLoadBar(p.loaded || 0, p.total || 0),
+      (err) => {
+        console.error("[texture-swap] error", err);
+        hideLoadBar(0);
+        isBorrowingTexture = false;
+        resolve(false);
+      },
+    );
+  });
 }
 
 function loadOutfit(name, opts = {}) {
@@ -1300,6 +1468,38 @@ function detectWardrobeCommand(textLower) {
   return null;
 }
 
+// FASE 7+ · "préstame la ropa de X" / "usa la textura de X" / "intercambia ropa con X"
+// Detecta el outfit objetivo y devuelve su clave; null si no aplica.
+const TEXTURE_BORROW_TRIGGERS = [
+  /pr(é|e)stame\s+(la\s+)?(ropa|textura)\s+(de\s+)?(la\s+)?(\w+)/i,
+  /usa\s+(la\s+)?(ropa|textura)\s+(de\s+)?(la\s+)?(\w+)/i,
+  /intercambia\s+(ropa|textura)\s+con\s+(la\s+)?(\w+)/i,
+  /toma\s+prestada?\s+(la\s+)?(ropa|textura)\s+(de\s+)?(la\s+)?(\w+)/i,
+  /con\s+la\s+ropa\s+de\s+(la\s+)?(\w+)/i,
+];
+const BORROW_NAME_TO_OUTFIT = {
+  maid: "maid", mucama: "maid", sirvienta: "maid",
+  cosplay: "cosplay", disfraz: "cosplay",
+  pijama: "pijama", piyama: "pijama",
+  sexy: "sexy1", "sexy2": "sexy2",
+  bikini: "sexy1", "bañador": "sexy1", "banador": "sexy1",
+  casual: "casual1", "casual1": "casual1", "casual2": "casual2", "casual3": "casual3",
+  hina: "hina", default: "hina",
+};
+
+function detectTextureBorrow(text) {
+  for (const re of TEXTURE_BORROW_TRIGGERS) {
+    const m = text.match(re);
+    if (!m) continue;
+    // el último grupo capturado es el nombre del outfit
+    const candidate = m[m.length - 1]?.toLowerCase();
+    if (!candidate) continue;
+    const out = BORROW_NAME_TO_OUTFIT[candidate];
+    if (out && WARDROBE[out]) return out;
+  }
+  return null;
+}
+
 const FOOD_GIFT_WORDS = [
   "pizza", "hamburguesa", "sushi", "ramen", "fideos", "pollo", "ceviche",
   "anticucho", "arroz", "papa", "papas", "chocolate", "chocolates",
@@ -2067,10 +2267,30 @@ async function handleUserMessage(text) {
     return;
   }
 
-  // FASE 7 · cambio de armario por sinónimo o comando explícito
-  const wardrobePick = detectWardrobeCommand(trimmed.toLowerCase());
+  // FASE 7+ · "préstame la ropa de X" → intercambio de texturas (sin recargar modelo)
+  const borrowSource = detectTextureBorrow(trimmed);
+  if (borrowSource && attachments.length === 0) {
+    const def = WARDROBE[borrowSource];
+    const r = `A ver, te enseño cómo me queda lo de ${def.label.toLowerCase()}.`;
+    appendMessage(r, "bot");
+    pushHistory("model", r);
+    speakResponse(r);
+    borrowTexturesFrom(borrowSource).then((ok) => {
+      if (!ok) {
+        appendMessage("(*No pude tomar prestada esa textura.*)", "system");
+      }
+    });
+    return;
+  }
+
+  // FASE 7 · cambio de armario por sinónimo o comando explícito.
+  // Si en el mismo mensaje viene además una acción, encadenamos:
+  //   "ponte el cosplay y salúdame" → cargar cosplay → esperar → playGesture("saluda")
+  const lower = trimmed.toLowerCase();
+  const wardrobePick = detectWardrobeCommand(lower);
+  const combinedAction = detectActionCommand(lower);
   if (wardrobePick && attachments.length === 0) {
-    if (wardrobePick === currentOutfit) {
+    if (wardrobePick === currentOutfit && !combinedAction) {
       const r = `Pero si ya llevo eso puesto. ¿Quieres otra cosa?`;
       appendMessage(r, "bot");
       pushHistory("model", r);
@@ -2078,15 +2298,33 @@ async function handleUserMessage(text) {
       return;
     }
     const def = WARDROBE[wardrobePick];
-    const r = `Bien, me cambio a ${def.label.toLowerCase()}.`;
-    appendMessage(r, "bot");
-    pushHistory("model", r);
-    speakResponse(r);
-    loadOutfit(wardrobePick);
+    let reply;
+    if (wardrobePick === currentOutfit && combinedAction) {
+      reply = "Listo, voy.";
+    } else if (combinedAction) {
+      reply = `Bien, me cambio a ${def.label.toLowerCase()} y enseguida te lo enseño.`;
+    } else {
+      reply = `Bien, me cambio a ${def.label.toLowerCase()}.`;
+    }
+    appendMessage(reply, "bot");
+    pushHistory("model", reply);
+    speakResponse(reply);
+    // promesa: detener gesto actual → cargar VRM → ejecutar acción cuando esté listo
+    if (activeGesture) {
+      // se interrumpe el gesto actual de forma suave
+      activeGesture = null;
+    }
+    (async () => {
+      const ok = wardrobePick === currentOutfit ? true : await loadOutfit(wardrobePick);
+      if (ok && combinedAction) {
+        // pequeño respiro para que la barra desaparezca antes del gesto
+        setTimeout(() => playGesture(combinedAction), 250);
+      }
+    })();
     return;
   }
 
-  // FASE 4/7 · acciones
+  // FASE 4/7 · acciones (sin cambio de ropa)
   const action = detectActionCommand(trimmed.toLowerCase());
   if (action && attachments.length === 0) {
     playGesture(action);
@@ -2174,6 +2412,10 @@ function showInitialGreeting() {
   if (Number.isFinite(piuraContext.tempC)) {
     const cond = piuraContext.conditionEs || "estable";
     greeting += ` Aquí en Piura ahora hay ${piuraContext.tempC}°C, ${cond}.`;
+    // FASE 7+ · sugerencia por calor
+    if (piuraContext.tempC > 30) {
+      greeting += " Hace un calor pesado, ¿quieres que me ponga algo más fresco?";
+    }
   }
 
   appendMessage(greeting, "bot");
