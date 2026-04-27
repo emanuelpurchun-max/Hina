@@ -1,4 +1,4 @@
-const CACHE_VERSION = "hina-v4";
+const CACHE_VERSION = "hina-v7";
 
 const PRECACHE_URLS = [
   "./",
@@ -6,7 +6,6 @@ const PRECACHE_URLS = [
   "./script.js",
   "./manifest.json",
   "./icon.svg",
-  "./personaje.vrm",
 ];
 
 self.addEventListener("install", (event) => {

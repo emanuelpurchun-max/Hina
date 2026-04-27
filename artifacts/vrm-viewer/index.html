@@ -467,6 +467,85 @@
         opacity: 0.6;
         text-align: center;
       }
+
+      /* FASE 7 · barra de carga global (outfits + animaciones) */
+      #load-bar {
+        position: fixed;
+        left: 50%;
+        top: 14px;
+        transform: translateX(-50%);
+        z-index: 80;
+        width: min(380px, calc(100% - 32px));
+        padding: 8px 12px 10px;
+        border-radius: 12px;
+        background: rgba(15, 15, 30, 0.78);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        backdrop-filter: blur(10px) saturate(140%);
+        -webkit-backdrop-filter: blur(10px) saturate(140%);
+        color: #fff;
+        font-size: 12px;
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      }
+      #load-bar.visible {
+        display: flex;
+      }
+      #load-bar-label {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        opacity: 0.9;
+      }
+      #load-bar-label .pct {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.75;
+      }
+      #load-bar-track {
+        height: 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+        overflow: hidden;
+      }
+      #load-bar-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #6a8bff, #b06bff);
+        transition: width 0.18s ease;
+      }
+
+      /* FASE 7 · selector rápido de armario */
+      #wardrobe-overlay {
+        position: fixed;
+        right: 16px;
+        top: 16px;
+        z-index: 70;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-width: 180px;
+      }
+      .wardrobe-btn {
+        background: rgba(15, 15, 30, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        text-align: left;
+        transition: background 0.15s ease;
+      }
+      .wardrobe-btn:hover {
+        background: rgba(255, 255, 255, 0.14);
+      }
+      .wardrobe-btn.current {
+        border-color: rgba(176, 107, 255, 0.65);
+        background: rgba(176, 107, 255, 0.18);
+      }
     </style>
     <script type="importmap">
       {
@@ -507,6 +586,16 @@
     </div>
 
     <div id="info">Esperando acceso…</div>
+
+    <div id="load-bar" role="status" aria-live="polite">
+      <div id="load-bar-label">
+        <span id="load-bar-text">Cargando…</span>
+        <span class="pct" id="load-bar-pct">0%</span>
+      </div>
+      <div id="load-bar-track"><div id="load-bar-fill"></div></div>
+    </div>
+
+    <div id="wardrobe-overlay" aria-label="Armario rápido"></div>
 
     <div id="chat-container">
       <div id="chat-log"></div>

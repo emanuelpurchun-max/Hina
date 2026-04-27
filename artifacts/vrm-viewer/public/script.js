@@ -372,50 +372,279 @@ window.addEventListener(
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 
-loader.load(
-  "personaje.vrm",
-  (gltf) => {
-    const vrm = gltf.userData.vrm;
+// =============================================================================
+// FASE 7 · BARRA DE PROGRESO GLOBAL (carga de outfits y animaciones)
+// =============================================================================
 
-    VRMUtils.removeUnnecessaryVertices(gltf.scene);
-    VRMUtils.removeUnnecessaryJoints(gltf.scene);
+const loadBarEl = document.getElementById("load-bar");
+const loadBarText = document.getElementById("load-bar-text");
+const loadBarPct = document.getElementById("load-bar-pct");
+const loadBarFill = document.getElementById("load-bar-fill");
+let loadBarHideTimer = null;
 
-    vrm.scene.traverse((obj) => {
-      obj.frustumCulled = false;
-    });
+function showLoadBar(label) {
+  if (!loadBarEl) return;
+  if (loadBarHideTimer) {
+    clearTimeout(loadBarHideTimer);
+    loadBarHideTimer = null;
+  }
+  if (loadBarText) loadBarText.textContent = label || "Cargando…";
+  if (loadBarFill) loadBarFill.style.width = "0%";
+  if (loadBarPct) loadBarPct.textContent = "0%";
+  loadBarEl.classList.add("visible");
+}
 
-    VRMUtils.rotateVRM0(vrm);
+function updateLoadBar(loaded, total, label) {
+  if (!loadBarEl) return;
+  if (label && loadBarText) loadBarText.textContent = label;
+  if (total > 0) {
+    const pct = Math.max(0, Math.min(100, Math.round((loaded / total) * 100)));
+    if (loadBarFill) loadBarFill.style.width = `${pct}%`;
+    if (loadBarPct) loadBarPct.textContent = `${pct}%`;
+  } else {
+    // tamaño desconocido: muestra MB descargados
+    const mb = (loaded / (1024 * 1024)).toFixed(1);
+    if (loadBarPct) loadBarPct.textContent = `${mb} MB`;
+  }
+}
 
-    scene.add(vrm.scene);
-    currentVrm = vrm;
+function hideLoadBar(delayMs = 600) {
+  if (!loadBarEl) return;
+  if (loadBarFill) loadBarFill.style.width = "100%";
+  if (loadBarPct) loadBarPct.textContent = "100%";
+  if (loadBarHideTimer) clearTimeout(loadBarHideTimer);
+  loadBarHideTimer = setTimeout(() => {
+    loadBarEl.classList.remove("visible");
+    loadBarHideTimer = null;
+  }, delayMs);
+}
 
-    const leftUpperArm = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
-    const rightUpperArm = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
-    if (leftUpperArm) leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
-    if (rightUpperArm) rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
+// =============================================================================
+// FASE 7 · ARMARIO (outfits VRM)
+// =============================================================================
 
-    if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+const WARDROBE = {
+  hina:    { label: "Hina (default)", path: "wardrobe/hina.vrm",    category: "default" },
+  casual1: { label: "Casual 1",       path: "wardrobe/casual1.vrm", category: "casual"  },
+  casual2: { label: "Casual 2",       path: "wardrobe/casual2.vrm", category: "casual"  },
+  casual3: { label: "Casual 3",       path: "wardrobe/casual3.vrm", category: "casual"  },
+  pijama:  { label: "Pijama",         path: "wardrobe/pijama.vrm",  category: "noche"   },
+  maid:    { label: "Maid",           path: "wardrobe/maid.vrm",    category: "especial"},
+  cosplay: { label: "Cosplay",        path: "wardrobe/cosplay.vrm", category: "especial"},
+  sexy1:   { label: "Sexy",           path: "wardrobe/sexy1.vrm",   category: "especial"},
+  sexy2:   { label: "Sexy 2",         path: "wardrobe/sexy2.vrm",   category: "especial"},
+};
 
-    captureRestPose(vrm);
+const OUTFIT_STORAGE_KEY = "hina.outfit.v1";
+let currentOutfit = "hina";
+let isOutfitLoading = false;
 
-    // Cámara fija "cara a cara" — la posición/target son los definidos arriba
-    // (camera.position 0,1.45,1.2 · target 0,1.45,0). No se ajusta al bbox del modelo
-    // para que Hina siempre quede mirándote a la altura del rostro al cargar.
-    controls.update();
+function persistCurrentOutfit() {
+  try { localStorage.setItem(OUTFIT_STORAGE_KEY, currentOutfit); } catch {}
+}
 
-    if (info) info.textContent = "Hina lista · mueve el cursor";
-  },
-  (progress) => {
-    if (info && progress.total) {
-      const pct = Math.round((progress.loaded / progress.total) * 100);
-      info.textContent = `Cargando personaje.vrm… ${pct}%`;
+function loadStoredOutfit() {
+  try {
+    const v = localStorage.getItem(OUTFIT_STORAGE_KEY);
+    if (v && WARDROBE[v]) return v;
+  } catch {}
+  return null;
+}
+
+function pickInitialOutfit() {
+  // 1) lo último que llevaba puesto, si existe
+  const stored = loadStoredOutfit();
+  if (stored) return stored;
+  // 2) por hora de Piura
+  const h = piuraLocalDate().getHours();
+  if (h >= 22 || h < 6) return "pijama";
+  // 3) casual aleatorio
+  const casuals = ["casual1", "casual2", "casual3"];
+  return casuals[Math.floor(Math.random() * casuals.length)];
+}
+
+function disposeVrm(vrm) {
+  if (!vrm) return;
+  scene.remove(vrm.scene);
+  vrm.scene.traverse((obj) => {
+    if (obj.geometry) obj.geometry.dispose?.();
+    if (obj.material) {
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of mats) {
+        for (const k of Object.keys(m)) {
+          const v = m[k];
+          if (v && typeof v === "object" && typeof v.dispose === "function" && v.isTexture) {
+            v.dispose();
+          }
+        }
+        m.dispose?.();
+      }
     }
-  },
-  (error) => {
-    console.error("Error cargando el modelo VRM:", error);
-    if (info) info.textContent = "Error al cargar personaje.vrm";
-  },
-);
+  });
+  VRMUtils.deepDispose?.(vrm.scene);
+}
+
+function applyDefaultRestPose(vrm) {
+  // brazos abajo (tipo "A pose" cómoda)
+  const leftUpperArm = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+  const rightUpperArm = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+  if (leftUpperArm) leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
+  if (rightUpperArm) rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
+}
+
+function loadOutfit(name, opts = {}) {
+  const def = WARDROBE[name];
+  if (!def) {
+    console.warn("[wardrobe] outfit desconocido:", name);
+    return Promise.resolve(false);
+  }
+  if (isOutfitLoading) {
+    console.log("[wardrobe] ya hay una carga en curso, se ignora", name);
+    return Promise.resolve(false);
+  }
+  isOutfitLoading = true;
+  const label = `Cargando ${def.label}…`;
+  showLoadBar(label);
+  if (info) info.textContent = label;
+
+  return new Promise((resolve) => {
+    loader.load(
+      def.path,
+      (gltf) => {
+        const vrm = gltf.userData.vrm;
+        VRMUtils.removeUnnecessaryVertices(gltf.scene);
+        VRMUtils.removeUnnecessaryJoints(gltf.scene);
+        vrm.scene.traverse((obj) => { obj.frustumCulled = false; });
+        VRMUtils.rotateVRM0(vrm);
+
+        // descarta outfit anterior
+        if (currentVrm) disposeVrm(currentVrm);
+
+        scene.add(vrm.scene);
+        currentVrm = vrm;
+        currentOutfit = name;
+        persistCurrentOutfit();
+
+        applyDefaultRestPose(vrm);
+        if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+        captureRestPose(vrm);
+
+        // ancla la cámara al hueso de la cabeza (J_Bip_C_Head)
+        anchorCameraToHead(vrm);
+
+        renderWardrobeButtons();
+        if (info) info.textContent = `Hina lista (${def.label})`;
+        hideLoadBar(500);
+        isOutfitLoading = false;
+
+        if (!opts.silent) {
+          appendMessage(`(*Hina ahora lleva: ${def.label}*)`, "system");
+        }
+        resolve(true);
+      },
+      (progress) => {
+        updateLoadBar(progress.loaded || 0, progress.total || 0, label);
+      },
+      (error) => {
+        console.error("[wardrobe] error cargando", def.path, error);
+        if (info) info.textContent = `Error al cargar ${def.label}`;
+        hideLoadBar(1500);
+        isOutfitLoading = false;
+        resolve(false);
+      },
+    );
+  });
+}
+
+// FASE 7 · cámara anclada al hueso de la cabeza
+let headBoneRef = null;
+const HEAD_OFFSET = new THREE.Vector3(0, 0.05, 0); // ligera altura por encima del hueso head
+function anchorCameraToHead(vrm) {
+  headBoneRef =
+    vrm.humanoid?.getRawBoneNode?.("head") ||
+    vrm.humanoid?.getNormalizedBoneNode?.("head") ||
+    null;
+  if (!headBoneRef) {
+    console.warn("[camera] no se encontró el hueso head, anclaje desactivado");
+  }
+}
+
+// =============================================================================
+// FASE 7 · ANIMACIONES POR CONTEXTO (saludo / pensativa / autónomas / heart)
+// =============================================================================
+//
+// Los .vmd originales se conservan en public/animations/ para una integración
+// futura con MMDLoader+retarget. Por ahora cada nombre dispara la animación
+// procedural equivalente — funciona instantáneamente con cualquier outfit
+// y no satura un Xiaomi.
+const VMD_TO_GESTURE = {
+  saludo: "saluda",
+  pensativa: "pensativa",
+  alternativo: "alternativo",
+  posec: "posec",
+  heart: "heart",
+};
+function playAnimation(name) {
+  const g = VMD_TO_GESTURE[name] || name;
+  playGesture(g);
+}
+
+const AUTONOMOUS_INTERVAL_MS = 45 * 1000;
+const AUTONOMOUS_POOL = ["alternativo", "posec"];
+let lastAutonomousAt = 0;
+
+function tickAutonomousAnimations() {
+  if (!currentVrm) return;
+  if (activeGesture) return;
+  if (isOutfitLoading) return;
+  if (Date.now() - lastAutonomousAt < AUTONOMOUS_INTERVAL_MS) return;
+  // espera a que el usuario haya entrado y a que esté quieto
+  if (typeof speechSynthesis !== "undefined" && speechSynthesis.speaking) return;
+  const pick = AUTONOMOUS_POOL[Math.floor(Math.random() * AUTONOMOUS_POOL.length)];
+  console.log("[autonomous] play", pick);
+  playAnimation(pick);
+  lastAutonomousAt = Date.now();
+}
+// no dispares en el primer minuto, deja que se asiente la escena
+lastAutonomousAt = Date.now();
+
+// =============================================================================
+// FASE 7 · Botonera rápida del armario (esquina sup. derecha)
+// =============================================================================
+
+const wardrobeOverlay = document.getElementById("wardrobe-overlay");
+function renderWardrobeButtons() {
+  if (!wardrobeOverlay) return;
+  wardrobeOverlay.innerHTML = "";
+  const order = ["hina", "casual1", "casual2", "casual3", "pijama", "maid", "cosplay", "sexy1", "sexy2"];
+  for (const k of order) {
+    const def = WARDROBE[k];
+    if (!def) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wardrobe-btn" + (k === currentOutfit ? " current" : "");
+    btn.textContent = def.label;
+    btn.addEventListener("click", () => {
+      if (k === currentOutfit) return;
+      loadOutfit(k);
+    });
+    wardrobeOverlay.appendChild(btn);
+  }
+}
+
+// arranca con un outfit; si ya hay clima cargado úsalo, si no usa hora
+async function bootInitialOutfit() {
+  // espera al primer fetch de clima (no bloquea más de ~1s)
+  for (let i = 0; i < 20; i += 1) {
+    if (piuraContext && piuraContext.fetchedAt > 0) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const initial = pickInitialOutfit();
+  await loadOutfit(initial, { silent: true });
+}
+// se difiere para que el resto del módulo (piuraContext, appendMessage, etc.)
+// haya terminado de evaluarse antes de tocarlo
+setTimeout(bootInitialOutfit, 0);
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -541,6 +770,113 @@ const GESTURES = {
       if (spine && rest.spine) {
         spine.rotation.x = rest.spine.x - 0.15 * k;
       }
+    },
+  },
+  // FASE 7 · pensativa — mano derecha al mentón, cabeza inclinada (mientras Gemini procesa)
+  pensativa: {
+    duration: 3.4,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const head = vrm.humanoid?.getNormalizedBoneNode("head");
+      const neck = vrm.humanoid?.getNormalizedBoneNode("neck");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const rest = basePoseRest || {};
+      if (head && rest.head) {
+        head.rotation.z = rest.head.z + 0.18 * k;
+        head.rotation.x = rest.head.x - 0.12 * k;
+      }
+      if (neck && rest.neck) neck.rotation.z = rest.neck.z + 0.08 * k;
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 1.25 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.55 * k;
+      }
+      if (rl && rest.rightLowerArm) {
+        rl.rotation.x = rest.rightLowerArm.x - 1.55 * k;
+      }
+      if (spine && rest.spine) spine.rotation.x = rest.spine.x - 0.05 * k;
+    },
+  },
+  // FASE 7 · alternativo — balanceo idle alterno (cadera + brazos suaves)
+  alternativo: {
+    duration: 4.2,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const sway = Math.sin(t * 1.6) * 0.18 * k;
+      const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const la = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const rest = basePoseRest || {};
+      if (hips && rest.hips) hips.rotation.y = rest.hips.y + sway;
+      if (spine && rest.spine) spine.rotation.y = rest.spine.y - sway * 0.4;
+      if (la && rest.leftUpperArm) {
+        la.rotation.x = rest.leftUpperArm.x - 0.18 * k;
+        la.rotation.z = rest.leftUpperArm.z + Math.sin(t * 1.6) * 0.18 * k;
+      }
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.x = rest.rightUpperArm.x - 0.18 * k;
+        ra.rotation.z = rest.rightUpperArm.z - Math.sin(t * 1.6) * 0.18 * k;
+      }
+    },
+  },
+  // FASE 7 · posec — pose tímida (manos delante, ligero giro de hombros)
+  posec: {
+    duration: 4.0,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const head = vrm.humanoid?.getNormalizedBoneNode("head");
+      const la = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const ll = vrm.humanoid?.getNormalizedBoneNode("leftLowerArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const rest = basePoseRest || {};
+      if (hips && rest.hips) hips.rotation.y = rest.hips.y - 0.12 * k;
+      if (spine && rest.spine) spine.rotation.y = rest.spine.y + 0.18 * k;
+      if (head && rest.head) head.rotation.z = rest.head.z - 0.12 * k;
+      if (la && rest.leftUpperArm) {
+        la.rotation.z = rest.leftUpperArm.z + 0.45 * k;
+        la.rotation.x = rest.leftUpperArm.x - 0.55 * k;
+      }
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 0.45 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.55 * k;
+      }
+      if (ll && rest.leftLowerArm) ll.rotation.x = rest.leftLowerArm.x - 1.0 * k;
+      if (rl && rest.rightLowerArm) rl.rotation.x = rest.rightLowerArm.x - 1.0 * k;
+    },
+  },
+  // FASE 7 · heart — gesto de afecto (manos al pecho formando corazón)
+  heart: {
+    duration: 3.6,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const beat = Math.abs(Math.sin(t * 4)) * 0.06 * k;
+      const la = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const ll = vrm.humanoid?.getNormalizedBoneNode("leftLowerArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const lh = vrm.humanoid?.getNormalizedBoneNode("leftHand");
+      const rh = vrm.humanoid?.getNormalizedBoneNode("rightHand");
+      const head = vrm.humanoid?.getNormalizedBoneNode("head");
+      const rest = basePoseRest || {};
+      if (la && rest.leftUpperArm) {
+        la.rotation.z = rest.leftUpperArm.z + 0.95 * k;
+        la.rotation.x = rest.leftUpperArm.x - 0.85 * k;
+      }
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 0.95 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.85 * k;
+      }
+      if (ll && rest.leftLowerArm) ll.rotation.x = rest.leftLowerArm.x - 1.45 * k;
+      if (rl && rest.rightLowerArm) rl.rotation.x = rest.rightLowerArm.x - 1.45 * k;
+      if (lh && rest.leftHand) lh.rotation.z = rest.leftHand.z - 0.6 * k;
+      if (rh && rest.rightHand) rh.rotation.z = rest.rightHand.z + 0.6 * k;
+      if (head && rest.head) head.rotation.x = rest.head.x - beat;
+      if (vrm.expressionManager) vrm.expressionManager.setValue("happy", 0.6 * k);
     },
   },
   // FASE 6 · cansancio (bostezo) — brazo derecho a la boca + cabeza atrás
@@ -896,11 +1232,73 @@ function reactHappy(durationMs = 2000) {
 // =============================================================================
 
 const ACTION_TRIGGERS = {
-  saluda: ["saluda", "salúdame", "saludame", "/saluda", "saludo"],
+  saluda: ["saluda", "salúdame", "saludame", "/saluda", "saludo", "hola", "buenas", "qué tal", "que tal"],
   baila: ["baila", "danza", "/baila", "bailame"],
   gira: ["gira", "/gira", "da una vuelta", "vuélta", "vuelta"],
   ven: ["ven", "/ven", "ven aquí", "ven aqui", "acércate", "acercate"],
+  heart: [
+    "te quiero", "te amo", "te adoro", "manda corazón", "manda corazon",
+    "dame amor", "/heart", "/corazon", "heart",
+  ],
+  pensativa: ["piensa", "piénsalo", "pensativa", "/pensativa"],
 };
+
+// FASE 7 · sinónimos de armario: cualquier frase que coincida cambia outfit.
+// El primer match gana; orden de mayor a menor especificidad.
+const WARDROBE_SYNONYMS = [
+  // pijama / dormir / cómodo
+  { outfit: "pijama", patterns: [
+    "pijama", "piyama", "ponte el pijama", "ponte la pijama",
+    "ropa de dormir", "ponte algo cómodo", "ponte algo comodo",
+    "modo dormir", "vamos a dormir",
+  ]},
+  // maid
+  { outfit: "maid", patterns: [
+    "maid", "mucama", "sirvienta", "ponte de maid", "ponte de mucama",
+    "modo maid",
+  ]},
+  // cosplay
+  { outfit: "cosplay", patterns: [
+    "cosplay", "ponte el cosplay", "modo cosplay", "disfraz",
+  ]},
+  // sexy / ropa de baño
+  { outfit: "sexy1", patterns: [
+    "ropa de baño", "ropa de bano", "bañador", "banador", "bikini",
+    "traje de baño", "traje de bano", "playa", "ponte sexy", "modo sexy",
+    "ropa atrevida",
+  ]},
+  { outfit: "sexy2", patterns: [
+    "sexy 2", "otra sexy", "más sexy", "mas sexy",
+  ]},
+  // casual aleatorio
+  { outfit: "__casual_random__", patterns: [
+    "ropa casual", "casual", "ponte casual", "ropa de calle",
+    "ropa de estudio", "ropa cómoda", "ropa comoda", "cámbiate", "cambiate",
+    "cambio de ropa", "otra ropa",
+  ]},
+  // explicítos
+  { outfit: "casual1", patterns: ["casual 1", "outfit 1"] },
+  { outfit: "casual2", patterns: ["casual 2", "outfit 2"] },
+  { outfit: "casual3", patterns: ["casual 3", "outfit 3"] },
+  { outfit: "hina", patterns: ["modo default", "ropa original", "tu ropa de siempre"] },
+];
+
+function detectWardrobeCommand(textLower) {
+  for (const entry of WARDROBE_SYNONYMS) {
+    for (const p of entry.patterns) {
+      const re = new RegExp(`(^|\\s|\\W)${p.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}(\\W|$)`, "i");
+      if (re.test(textLower)) {
+        let outfit = entry.outfit;
+        if (outfit === "__casual_random__") {
+          const pool = ["casual1", "casual2", "casual3"].filter((c) => c !== currentOutfit);
+          outfit = pool[Math.floor(Math.random() * pool.length)];
+        }
+        return outfit;
+      }
+    }
+  }
+  return null;
+}
 
 const FOOD_GIFT_WORDS = [
   "pizza", "hamburguesa", "sushi", "ramen", "fideos", "pollo", "ceviche",
@@ -1669,15 +2067,36 @@ async function handleUserMessage(text) {
     return;
   }
 
-  // FASE 4 · acciones
+  // FASE 7 · cambio de armario por sinónimo o comando explícito
+  const wardrobePick = detectWardrobeCommand(trimmed.toLowerCase());
+  if (wardrobePick && attachments.length === 0) {
+    if (wardrobePick === currentOutfit) {
+      const r = `Pero si ya llevo eso puesto. ¿Quieres otra cosa?`;
+      appendMessage(r, "bot");
+      pushHistory("model", r);
+      speakResponse(r);
+      return;
+    }
+    const def = WARDROBE[wardrobePick];
+    const r = `Bien, me cambio a ${def.label.toLowerCase()}.`;
+    appendMessage(r, "bot");
+    pushHistory("model", r);
+    speakResponse(r);
+    loadOutfit(wardrobePick);
+    return;
+  }
+
+  // FASE 4/7 · acciones
   const action = detectActionCommand(trimmed.toLowerCase());
   if (action && attachments.length === 0) {
     playGesture(action);
     const responses = {
-      saluda: ["Hola.", "Te saludo.", "Hey, hola."],
+      saluda: ["¡Hola!", "Te saludo.", "Hey, hola."],
       baila: ["¡A bailar!", "Mira mis pasos.", "¿Qué tal este ritmo?"],
       gira: ["Una vuelta.", "Mírame.", "Lista."],
       ven: ["Voy.", "Aquí estoy.", "Acércate tú también."],
+      heart: ["Para ti.", "Mi corazón es tuyo.", "Te lo mando.", "Toma."],
+      pensativa: ["Mmm…", "Déjame pensarlo.", "A ver…"],
     };
     const list = responses[action] || ["Hecho."];
     const reply = list[Math.floor(Math.random() * list.length)];
@@ -1691,6 +2110,12 @@ async function handleUserMessage(text) {
   consumeEnergyForMessage();
 
   const thinkingBubble = appendMessage("Hina está pensando…", "bot");
+
+  // FASE 7 · si la consulta es larga (probablemente "difícil"), juega "pensativa"
+  // mientras Gemini procesa. Para preguntas cortas, no la dispares (sería ruido).
+  if (!activeGesture && (trimmed.length > 80 || /\?/.test(trimmed))) {
+    playGesture("pensativa");
+  }
 
   try {
     const replyRaw = attachments.length
@@ -1744,8 +2169,35 @@ function showInitialGreeting() {
   } else {
     greeting = `¡${memory.profile.name}! Te estaba esperando.`;
   }
+
+  // FASE 7 · menciona el clima de Piura si lo tenemos
+  if (Number.isFinite(piuraContext.tempC)) {
+    const cond = piuraContext.conditionEs || "estable";
+    greeting += ` Aquí en Piura ahora hay ${piuraContext.tempC}°C, ${cond}.`;
+  }
+
   appendMessage(greeting, "bot");
   pushHistory("model", greeting);
+
+  // FASE 7 · saludo automático al iniciar sesión
+  playGesture("saluda");
+
+  // FASE 7 · auto-Lofi si el clima es tranquilo
+  maybeAutoplayLofi();
+}
+
+// FASE 7 · si el clima de Piura está tranquilo, abre el reproductor lofi
+const CALM_WEATHER_CODES = new Set([0, 1, 2, 3, 45, 48]); // despejado/nublado/neblina
+let lofiAutoplayed = false;
+function maybeAutoplayLofi() {
+  if (lofiAutoplayed) return;
+  if (!Number.isFinite(piuraContext.conditionCode)) return;
+  if (!CALM_WEATHER_CODES.has(piuraContext.conditionCode)) return;
+  // si la temperatura es muy alta (>32) tampoco lo lances solo, no encaja
+  if (Number.isFinite(piuraContext.tempC) && piuraContext.tempC > 32) return;
+  lofiAutoplayed = true;
+  // delay para no cortar el saludo TTS
+  setTimeout(() => openMusicOverlay(""), 1500);
 }
 
 // =============================================================================
@@ -1940,6 +2392,19 @@ function animate() {
 
     currentVrm.update(delta);
   }
+
+  // FASE 7 · cámara anclada al hueso de la cabeza (J_Bip_C_Head)
+  // así no se pierde la vista frontal al bailar, girar o cambiar de ropa.
+  if (headBoneRef) {
+    const worldPos = new THREE.Vector3();
+    headBoneRef.getWorldPosition(worldPos);
+    worldPos.add(HEAD_OFFSET);
+    // suavizado para que el cambio de outfit no haga "brincar" la cámara
+    controls.target.lerp(worldPos, 0.18);
+  }
+
+  // FASE 7 · animaciones autónomas (cada 45s, mientras esté quieta)
+  tickAutonomousAnimations();
 
   controls.update();
   renderer.render(scene, camera);
