@@ -107,6 +107,7 @@ function updateAffection(userText) {
   }
   affectionLastInteractionAt = Date.now();
   persistAffection();
+  updateMemoryAffectionPeak();
 }
 
 function affectionLevel(score = affectionScore) {
@@ -120,6 +121,96 @@ applyInactivityDecay();
 console.log(
   `[affect] inicio: score=${affectionScore} nivel=${affectionLevel()}`,
 );
+
+const MEMORY_STORAGE_KEY = "hina.memory.v1";
+const MEMORY_MAX_SUMMARIES = 10;
+const HISTORY_WINDOW = 3;
+const SUMMARY_EVERY_N_USER_MSGS = 10;
+
+const DEFAULT_MEMORY = {
+  profile: {
+    name: "Víctor",
+    city: "Piura, Perú",
+    career: "Ingeniería de Software",
+    institute: "SENATI",
+    language: "Python",
+  },
+  highestAffectionReached: 10,
+  highestLevelReached: "low",
+  summaries: [],
+  totalUserMessages: 0,
+};
+
+let memory = structuredClone(DEFAULT_MEMORY);
+
+function loadMemory() {
+  try {
+    const raw = localStorage.getItem(MEMORY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    memory = {
+      ...DEFAULT_MEMORY,
+      ...parsed,
+      profile: { ...DEFAULT_MEMORY.profile, ...(parsed?.profile || {}) },
+      summaries: Array.isArray(parsed?.summaries) ? parsed.summaries : [],
+    };
+  } catch (err) {
+    console.warn("[memory] no se pudo leer:", err);
+  }
+}
+
+function persistMemory() {
+  try {
+    localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(memory));
+  } catch (err) {
+    console.warn("[memory] no se pudo guardar:", err);
+  }
+}
+
+function updateMemoryAffectionPeak() {
+  const level = affectionLevel(affectionScore);
+  let changed = false;
+  if (affectionScore > (memory.highestAffectionReached || 0)) {
+    memory.highestAffectionReached = affectionScore;
+    changed = true;
+  }
+  const ranking = { low: 0, mid: 1, high: 2 };
+  if (
+    ranking[level] > ranking[memory.highestLevelReached || "low"]
+  ) {
+    memory.highestLevelReached = level;
+    changed = true;
+  }
+  if (changed) {
+    console.log(
+      `[memory] nuevo pico: score=${memory.highestAffectionReached} nivel=${memory.highestLevelReached}`,
+    );
+    persistMemory();
+  }
+}
+
+function distilledMemoryForServer() {
+  return {
+    profile: memory.profile,
+    summaries: memory.summaries.slice(-3),
+    highestLevelReached: memory.highestLevelReached,
+  };
+}
+
+loadMemory();
+console.log("[memory] cargada:", {
+  profile: memory.profile,
+  summaries: memory.summaries.length,
+  totalUserMessages: memory.totalUserMessages,
+  highestLevelReached: memory.highestLevelReached,
+});
+
+const chatHistory = [];
+
+function pushHistory(role, text) {
+  chatHistory.push({ role, text });
+  if (chatHistory.length > 20) chatHistory.shift();
+}
 
 const info = document.getElementById("info");
 
@@ -571,16 +662,14 @@ function reactHappy(durationMs = 2000) {
   }, durationMs);
 }
 
-async function askGemini(userText) {
-  const requestBody = JSON.stringify({
-    message: userText,
-    affectionScore,
-  });
+async function postChatOnce(payload) {
+  const requestBody = JSON.stringify(payload);
   console.log("Petición al servidor:", {
     url: CHAT_ENDPOINT,
-    affectionScore,
-    level: affectionLevel(),
-    body: requestBody,
+    affectionScore: payload.affectionScore,
+    level: affectionLevel(payload.affectionScore),
+    historyLen: payload.history?.length || 0,
+    summaries: payload.memory?.summaries?.length || 0,
   });
 
   const response = await fetch(CHAT_ENDPOINT, {
@@ -624,6 +713,67 @@ async function askGemini(userText) {
   return reply;
 }
 
+async function askGemini(userText) {
+  const payload = {
+    message: userText,
+    affectionScore,
+    history: chatHistory.slice(-HISTORY_WINDOW),
+    memory: distilledMemoryForServer(),
+  };
+
+  try {
+    return await postChatOnce(payload);
+  } catch (err) {
+    if (err?.status === 429) {
+      console.warn(
+        "[chat] 429 recibido — esperando 2s y reintentando una vez...",
+      );
+      await new Promise((r) => setTimeout(r, 2000));
+      return await postChatOnce(payload);
+    }
+    throw err;
+  }
+}
+
+async function requestSummary() {
+  const recent = chatHistory.slice(-6);
+  if (recent.length < 2) return;
+
+  console.log(
+    `[memory] generando resumen tras ${memory.totalUserMessages} mensajes…`,
+  );
+
+  try {
+    const response = await fetch("/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        history: recent,
+        userName: memory.profile.name,
+      }),
+    });
+    if (!response.ok) {
+      console.warn("[memory] resumen falló: HTTP", response.status);
+      return;
+    }
+    const data = await response.json().catch(() => null);
+    const summary =
+      typeof data?.summary === "string" ? data.summary.trim() : "";
+    if (!summary) {
+      console.warn("[memory] resumen vacío");
+      return;
+    }
+    memory.summaries.push(summary);
+    if (memory.summaries.length > MEMORY_MAX_SUMMARIES) {
+      memory.summaries = memory.summaries.slice(-MEMORY_MAX_SUMMARIES);
+    }
+    persistMemory();
+    console.log(`[memory] hito guardado: "${summary}"`);
+  } catch (err) {
+    console.warn("[memory] error generando resumen:", err);
+  }
+}
+
 async function handleUserMessage(text) {
   const trimmed = text.trim();
   if (!trimmed) return;
@@ -638,6 +788,10 @@ async function handleUserMessage(text) {
 
   appendMessage(trimmed, "user");
   chatInput.value = "";
+  pushHistory("user", trimmed);
+
+  memory.totalUserMessages = (memory.totalUserMessages || 0) + 1;
+  persistMemory();
 
   const thinkingBubble = appendMessage("Hina está pensando...", "bot");
 
@@ -648,8 +802,13 @@ async function handleUserMessage(text) {
     } else {
       appendMessage(reply, "bot");
     }
+    pushHistory("model", reply);
     reactHappy(3000);
     speakResponse(reply);
+
+    if (memory.totalUserMessages % SUMMARY_EVERY_N_USER_MSGS === 0) {
+      requestSummary();
+    }
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
 
@@ -668,6 +827,30 @@ async function handleUserMessage(text) {
       appendMessage(errorText, "bot");
     }
   }
+}
+
+function showInitialGreeting() {
+  if (!chatLog) return;
+  const name = memory.profile.name;
+  const city = memory.profile.city;
+  const lvl = affectionLevel(affectionScore);
+
+  let greeting;
+  if (lvl === "low") {
+    greeting = `Tch, ya regresaste, ${name}. ¿Hoy sí piensas estudiar en SENATI o solo vienes a perder el tiempo?`;
+  } else if (lvl === "mid") {
+    greeting = `Hola, ${name}… no te emociones. Solo me alegra un poco verte de vuelta.`;
+  } else {
+    greeting = `¡${name}! Te estaba esperando. ¿Cómo va todo por ${city}? Cuéntame qué proyecto de Python traes hoy.`;
+  }
+
+  if (memory.summaries.length > 0) {
+    const lastSummary = memory.summaries[memory.summaries.length - 1];
+    console.log(`[memory] último hito recordado: "${lastSummary}"`);
+  }
+
+  appendMessage(greeting, "bot");
+  pushHistory("model", greeting);
 }
 
 if (chatBar) {
@@ -767,3 +950,4 @@ function animate() {
 }
 
 animate();
+showInitialGreeting();

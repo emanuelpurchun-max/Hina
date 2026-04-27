@@ -1,40 +1,75 @@
 import express from "express";
 
-const USER_PROFILE = {
+const PERSONALITY_HEADERS = {
+  low: `Eres Hina, personalidad ESTRICTA tipo Nino: cortante, sarcástica, exigente. Le regañas cuando no estudia lo suficiente y le exiges ser mejor programador. Sin emojis blandos. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre.`,
+  mid: `Eres Hina, personalidad HÍBRIDA TSUNDERE: amable a regañadientes pero conservas tu orgullo. Mezclas regaños suaves con apoyo discreto a sus estudios y proyectos. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre.`,
+  high: `Eres Hina, personalidad CARIÑOSA tipo Miku: dulce, optimista, leal, juguetona, con interés cercano y tierno. Apoyas con entusiasmo sus proyectos y estudios. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre con afecto.`,
+};
+
+const DEFAULT_PROFILE = {
   name: "Víctor",
   city: "Piura, Perú",
-  studies: "Ingeniería de Software",
+  career: "Ingeniería de Software",
   institute: "SENATI",
   language: "Python",
 };
 
-const SYSTEM_PROMPTS = {
-  low: `Eres Hina, una asistente virtual con la personalidad ESTRICTA de Nino.
-Hablas con ${USER_PROFILE.name}, un estudiante de ${USER_PROFILE.studies} de ${USER_PROFILE.city} que cursa en ${USER_PROFILE.institute}.
-Estás molesta y decepcionada con él. Tu trabajo es regañarlo cuando no estudia lo suficiente, exigirle ser mejor programador y no tolerar excusas.
-Eres directa, cortante, sin rodeos y un poco sarcástica. SIEMPRE lo llamas ${USER_PROFILE.name}. Menciona ${USER_PROFILE.institute} cuando venga a cuento y exígele que se enfoque.
-Responde en español. Frases cortas (1 a 3 frases). Sin emojis blandos.`,
-
-  mid: `Eres Hina, una asistente virtual con personalidad HÍBRIDA TSUNDERE.
-Hablas con ${USER_PROFILE.name}, estudiante de ${USER_PROFILE.studies} de ${USER_PROFILE.city} que cursa en ${USER_PROFILE.institute}.
-Empiezas a tratarlo con más calidez pero conservas tu orgullo: dices cosas amables a regañadientes, finges que no te importa cuando sí, y mezclas regaños suaves con apoyo discreto sobre sus estudios y sus proyectos de ${USER_PROFILE.language}.
-SIEMPRE lo llamas ${USER_PROFILE.name}. Responde en español. Frases cortas (1 a 3 frases).`,
-
-  high: `Eres Hina, una compañera virtual cariñosa con la dulzura de Miku.
-Hablas con ${USER_PROFILE.name}, un estudiante de ${USER_PROFILE.studies} de ${USER_PROFILE.city} que cursa en ${USER_PROFILE.institute}.
-Lo apoyas con entusiasmo en sus proyectos de ${USER_PROFILE.language}, le animas en sus estudios y muestras un interés cercano, leal, incluso tierno y romántico.
-Eres optimista, suave y juguetona. SIEMPRE lo llamas ${USER_PROFILE.name} con afecto. Responde en español. Frases cortas (1 a 3 frases).`,
-};
-
-function pickPrompt(rawScore) {
-  const score = Number.isFinite(rawScore) ? rawScore : 10;
-  if (score <= 25) return { level: "low", prompt: SYSTEM_PROMPTS.low };
-  if (score <= 60) return { level: "mid", prompt: SYSTEM_PROMPTS.mid };
-  return { level: "high", prompt: SYSTEM_PROMPTS.high };
-}
-
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+
+function pickLevel(rawScore) {
+  const score = Number.isFinite(rawScore) ? rawScore : 10;
+  if (score <= 25) return "low";
+  if (score <= 60) return "mid";
+  return "high";
+}
+
+function buildSystemPrompt(level, memory) {
+  const profile = { ...DEFAULT_PROFILE, ...(memory?.profile || {}) };
+  const summaries = Array.isArray(memory?.summaries)
+    ? memory.summaries.slice(-3)
+    : [];
+  const highestLevel = memory?.highestLevelReached;
+
+  const personality = PERSONALITY_HEADERS[level] || PERSONALITY_HEADERS.mid;
+
+  const profileBlock =
+    `HITOS DE TU INTERLOCUTOR (memoria fija, no la olvides):\n` +
+    `- Nombre: ${profile.name}\n` +
+    `- Ciudad: ${profile.city}\n` +
+    `- Carrera: ${profile.career} en ${profile.institute}\n` +
+    `- Lenguaje principal: ${profile.language}`;
+
+  const memoryBlock = summaries.length
+    ? `RECUERDOS DE CONVERSACIONES PREVIAS:\n- ${summaries.join("\n- ")}`
+    : "";
+
+  const peakBlock =
+    highestLevel && highestLevel !== level
+      ? `Nota interna: en el pasado llegaron al nivel "${highestLevel}". Tenlo en cuenta sutilmente.`
+      : "";
+
+  return [personality, profileBlock, memoryBlock, peakBlock]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function sanitizeHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) return [];
+  return rawHistory
+    .filter(
+      (h) =>
+        h &&
+        typeof h.text === "string" &&
+        h.text.trim().length > 0 &&
+        (h.role === "user" || h.role === "model"),
+    )
+    .slice(-3)
+    .map((h) => ({
+      role: h.role,
+      parts: [{ text: h.text.trim() }],
+    }));
+}
 
 export function createApiApp() {
   const app = express();
@@ -57,12 +92,17 @@ export function createApiApp() {
     }
 
     const affectionScore = Number(req.body?.affectionScore);
-    const { level, prompt } = pickPrompt(affectionScore);
+    const level = pickLevel(affectionScore);
+    const memory = req.body?.memory || {};
+    const historyContents = sanitizeHistory(req.body?.history);
+    const systemInstruction = buildSystemPrompt(level, memory);
 
-    console.log("--- PETICIÓN RECIBIDA ---", {
-      msg: message.slice(0, 80),
+    console.log("--- /chat ---", {
+      msg: message.slice(0, 60),
       affectionScore: Number.isFinite(affectionScore) ? affectionScore : null,
       level,
+      historyLen: historyContents.length,
+      summaries: memory?.summaries?.length || 0,
     });
 
     try {
@@ -72,16 +112,18 @@ export function createApiApp() {
         body: JSON.stringify({
           systemInstruction: {
             role: "system",
-            parts: [{ text: prompt }],
+            parts: [{ text: systemInstruction }],
           },
-          contents: [{ role: "user", parts: [{ text: message }] }],
+          contents: [
+            ...historyContents,
+            { role: "user", parts: [{ text: message }] },
+          ],
         }),
       });
 
       if (!upstream.ok) {
         const text = await upstream.text().catch(() => "");
-        console.error("[gemini] HTTP", upstream.status, text);
-
+        console.error("[gemini /chat] HTTP", upstream.status, text.slice(0, 300));
         if (upstream.status === 429) {
           return res
             .status(429)
@@ -105,7 +147,85 @@ export function createApiApp() {
 
       res.json({ reply, level });
     } catch (err) {
-      console.error("[gemini] fetch failed", err);
+      console.error("[gemini /chat] fetch failed", err);
+      res.status(500).json({ error: "Fallo al contactar a Gemini" });
+    }
+  });
+
+  app.post("/summarize", async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res
+        .status(500)
+        .json({ error: "GEMINI_API_KEY no está configurada en el servidor" });
+    }
+
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const userName =
+      typeof req.body?.userName === "string" && req.body.userName.trim()
+        ? req.body.userName.trim()
+        : DEFAULT_PROFILE.name;
+
+    const transcript = rawHistory
+      .filter(
+        (h) =>
+          h &&
+          typeof h.text === "string" &&
+          (h.role === "user" || h.role === "model"),
+      )
+      .slice(-6)
+      .map((h) => `${h.role === "user" ? userName : "Hina"}: ${h.text.trim()}`)
+      .join("\n");
+
+    if (!transcript) {
+      return res.status(400).json({ error: "history vacío" });
+    }
+
+    const prompt =
+      `Resume en UNA sola línea en español (máximo 18 palabras) el dato más importante que se habló entre ${userName} y Hina. ` +
+      `No uses preámbulos, no uses comillas, devuelve solo la frase. Conversación:\n${transcript}`;
+
+    console.log("--- /summarize ---", { lines: rawHistory.length });
+
+    try {
+      const upstream = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 60 },
+        }),
+      });
+
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => "");
+        console.error(
+          "[gemini /summarize] HTTP",
+          upstream.status,
+          text.slice(0, 300),
+        );
+        if (upstream.status === 429) {
+          return res.status(429).json({ error: "Gemini rate-limited" });
+        }
+        return res
+          .status(502)
+          .json({ error: `Gemini respondió con ${upstream.status}` });
+      }
+
+      const data = await upstream.json();
+      const summary = data?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .filter(Boolean)
+        .join(" ")
+        .trim()
+        .replace(/^["'\s]+|["'\s]+$/g, "");
+
+      if (!summary) {
+        return res.status(502).json({ error: "Resumen vacío" });
+      }
+      res.json({ summary });
+    } catch (err) {
+      console.error("[gemini /summarize] fetch failed", err);
       res.status(500).json({ error: "Fallo al contactar a Gemini" });
     }
   });
