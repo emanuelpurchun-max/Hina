@@ -11,6 +11,71 @@ const AUTH_STORAGE_KEY = "hina.auth.token.v1";
 const AUTH_ENDPOINT = "/auth";
 const CHAT_ENDPOINT = "/chat";
 const ANALYZE_ENDPOINT = "/analyze";
+
+// =============================================================================
+// FASE 8 · CEREBRO DUAL (Gemini + Groq) con persistencia y aviso visual
+// =============================================================================
+const BRAIN_STORAGE_KEY = "hina.brain.v1";
+const BRAIN_OPTIONS = ["gemini", "groq"];
+let currentBrain = (() => {
+  try {
+    const v = localStorage.getItem(BRAIN_STORAGE_KEY);
+    return BRAIN_OPTIONS.includes(v) ? v : "gemini";
+  } catch {
+    return "gemini";
+  }
+})();
+function persistBrain() {
+  try { localStorage.setItem(BRAIN_STORAGE_KEY, currentBrain); } catch {}
+}
+
+function brainLabel(b) {
+  return b === "groq" ? "Groq · llama3-70b" : "Gemini · flash";
+}
+
+function refreshBrainToggleUi() {
+  const btn = document.getElementById("brain-toggle");
+  if (!btn) return;
+  btn.dataset.brain = currentBrain;
+  btn.textContent = currentBrain === "groq" ? "🧠 Groq" : "🧠 Gemini";
+  btn.title = `Cerebro activo: ${brainLabel(currentBrain)} · click para cambiar`;
+}
+
+function setBrain(next, opts = {}) {
+  if (!BRAIN_OPTIONS.includes(next)) return;
+  if (currentBrain === next) return;
+  currentBrain = next;
+  persistBrain();
+  refreshBrainToggleUi();
+  if (opts.silent) return;
+  const msg = next === "groq"
+    ? "Cambiando a procesador de alta velocidad para ayudarte mejor."
+    : "Vuelvo al cerebro Gemini, tengo más contexto multimodal aquí.";
+  appendMessage(msg, "bot");
+  pushHistory("model", msg);
+  speakResponse(msg);
+}
+
+function toggleBrain() {
+  setBrain(currentBrain === "groq" ? "gemini" : "groq");
+}
+
+// Aviso silencioso (no se habla) cuando el servidor cae al otro cerebro
+// por error 401/429/500 — solo mostramos un mensaje de sistema y actualizamos el toggle.
+let lastFallbackToast = 0;
+function notifyBrainSwitchedByFallback(requested, actual) {
+  const now = Date.now();
+  if (now - lastFallbackToast < 5000) return; // no spamear
+  lastFallbackToast = now;
+  appendMessage(
+    `(*${brainLabel(requested)} no respondió, salté a ${brainLabel(actual)}.*)`,
+    "system",
+  );
+  // sincronizamos el toggle con la realidad para no engañar al usuario
+  currentBrain = actual;
+  persistBrain();
+  refreshBrainToggleUi();
+}
 const SUMMARIZE_ENDPOINT = "/summarize";
 
 let authToken = null;
@@ -697,6 +762,18 @@ function loadOutfit(name, opts = {}) {
         if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
         captureRestPose(vrm);
 
+        // FASE 8 · Watcher anti-T-pose: algunos VRMs (casual2, casual3, pijama,
+        // cosplay) tienen una pose interna que sobreescribe la nuestra durante
+        // los primeros frames. Volvemos a normalizar 5 frames y a 100/300 ms.
+        const reapply = () => {
+          if (currentVrm === vrm) normalizeToHinaPose(vrm);
+        };
+        for (let i = 1; i <= 5; i++) {
+          requestAnimationFrame(reapply);
+        }
+        setTimeout(reapply, 100);
+        setTimeout(reapply, 300);
+
         // ancla la cámara al hueso de la cabeza (J_Bip_C_Head)
         anchorCameraToHead(vrm);
 
@@ -779,6 +856,13 @@ lastAutonomousAt = Date.now();
 // =============================================================================
 // FASE 7 · Botonera rápida del armario (esquina sup. derecha)
 // =============================================================================
+
+// FASE 8 · Toggle del cerebro (Gemini ↔ Groq)
+const brainToggleBtn = document.getElementById("brain-toggle");
+if (brainToggleBtn) {
+  brainToggleBtn.addEventListener("click", () => toggleBrain());
+  refreshBrainToggleUi();
+}
 
 const wardrobeOverlay = document.getElementById("wardrobe-overlay");
 function renderWardrobeButtons() {
@@ -1476,7 +1560,29 @@ const TEXTURE_BORROW_TRIGGERS = [
   /intercambia\s+(ropa|textura)\s+con\s+(la\s+)?(\w+)/i,
   /toma\s+prestada?\s+(la\s+)?(ropa|textura)\s+(de\s+)?(la\s+)?(\w+)/i,
   /con\s+la\s+ropa\s+de\s+(la\s+)?(\w+)/i,
+  // "ponte la ropa de la maid" → cambia SOLO la textura del modelo actual
+  /ponte\s+la\s+ropa\s+de\s+(la\s+|el\s+)?(\w+)/i,
 ];
+
+// FASE 8 · "cámbiate a X" / "cambia al modelo X" → carga el .vrm completo.
+// Esto es estrictamente DISTINTO a "ponte la ropa de X" (que solo cambia textura).
+const VRM_LOAD_TRIGGERS = [
+  /c(á|a)mbiate\s+a(l|\s+la)?\s+(\w+)/i,
+  /cambia\s+(al?|la)?\s*modelo\s+(\w+)/i,
+  /carga\s+(el|la)?\s*(modelo\s+)?(\w+)/i,
+];
+
+function detectVrmLoadCommand(text) {
+  for (const re of VRM_LOAD_TRIGGERS) {
+    const m = text.match(re);
+    if (!m) continue;
+    const candidate = m[m.length - 1]?.toLowerCase();
+    if (!candidate) continue;
+    const out = BORROW_NAME_TO_OUTFIT[candidate];
+    if (out && WARDROBE[out]) return out;
+  }
+  return null;
+}
 const BORROW_NAME_TO_OUTFIT = {
   maid: "maid", mucama: "maid", sirvienta: "maid",
   cosplay: "cosplay", disfraz: "cosplay",
@@ -2092,12 +2198,18 @@ async function postChatOnce(payload) {
 
   const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
   if (!reply) throw new Error("Respuesta sin 'reply'");
+  // El servidor puede haber redirigido a otro cerebro por error 401/429/500.
+  // Avisamos al usuario y actualizamos el indicador visual sin perder el flujo.
+  if (data?.brainUsed && data.brainUsed !== currentBrain) {
+    notifyBrainSwitchedByFallback(currentBrain, data.brainUsed);
+  }
   return reply;
 }
 
 async function askGemini(userText) {
   const payload = {
     message: userText,
+    brain: currentBrain,
     affectionScore,
     history: chatHistory.slice(-HISTORY_WINDOW),
     memory: distilledMemoryForServer(),
@@ -2120,6 +2232,7 @@ async function analyzeWithFiles(userText, attachments) {
   );
   const payload = {
     message: userText,
+    brain: currentBrain,
     affectionScore,
     memory: distilledMemoryForServer(),
     context: buildLocalContext(),
@@ -2148,6 +2261,9 @@ async function analyzeWithFiles(userText, attachments) {
   }
   const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
   if (!reply) throw new Error("Respuesta sin 'reply'");
+  if (data?.brainUsed && data.brainUsed !== currentBrain && !data?.forcedGemini) {
+    notifyBrainSwitchedByFallback(currentBrain, data.brainUsed);
+  }
   return reply;
 }
 
@@ -2267,7 +2383,26 @@ async function handleUserMessage(text) {
     return;
   }
 
-  // FASE 7+ · "préstame la ropa de X" → intercambio de texturas (sin recargar modelo)
+  // FASE 8 · "cámbiate a X" → carga estricta del .vrm completo
+  const loadTarget = detectVrmLoadCommand(trimmed);
+  if (loadTarget && attachments.length === 0) {
+    if (loadTarget === currentOutfit) {
+      const r = `Pero si ya soy esa.`;
+      appendMessage(r, "bot");
+      pushHistory("model", r);
+      speakResponse(r);
+      return;
+    }
+    const def = WARDROBE[loadTarget];
+    const r = `Voy, me cambio a ${def.label.toLowerCase()}.`;
+    appendMessage(r, "bot");
+    pushHistory("model", r);
+    speakResponse(r);
+    loadOutfit(loadTarget);
+    return;
+  }
+
+  // FASE 7+ · "préstame la ropa de X" / "ponte la ropa de X" → solo textura
   const borrowSource = detectTextureBorrow(trimmed);
   if (borrowSource && attachments.length === 0) {
     const def = WARDROBE[borrowSource];

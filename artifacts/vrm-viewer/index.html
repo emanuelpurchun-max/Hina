@@ -546,6 +546,36 @@
         border-color: rgba(176, 107, 255, 0.65);
         background: rgba(176, 107, 255, 0.18);
       }
+
+      /* FASE 8 · selector de cerebro (Gemini ↔ Groq) */
+      #brain-toggle {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 70;
+        background: rgba(15, 15, 30, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 7px 14px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      #brain-toggle:hover {
+        background: rgba(255, 255, 255, 0.14);
+      }
+      #brain-toggle[data-brain="groq"] {
+        border-color: rgba(255, 138, 76, 0.7);
+        background: rgba(255, 138, 76, 0.18);
+      }
+      #brain-toggle[data-brain="gemini"] {
+        border-color: rgba(96, 165, 250, 0.6);
+        background: rgba(96, 165, 250, 0.18);
+      }
     </style>
     <script type="importmap">
       {
@@ -596,6 +626,13 @@
     </div>
 
     <div id="wardrobe-overlay" aria-label="Armario rápido"></div>
+
+    <button
+      id="brain-toggle"
+      type="button"
+      data-brain="gemini"
+      title="Cerebro activo: Gemini · click para cambiar"
+    >🧠 Gemini</button>
 
     <div id="chat-container">
       <div id="chat-log"></div>

@@ -14,6 +14,12 @@ const PERSONALITY_HEADERS = {
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
 
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "llama3-70b-8192";
+
+// Códigos por los que la redundancia automática salta al otro cerebro
+const FALLBACK_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504]);
+
 const INLINE_OK_PREFIXES = ["image/", "audio/", "video/"];
 const INLINE_OK_EXACT = new Set([
   "application/pdf",
@@ -35,8 +41,24 @@ function getApiKey() {
   return sanitizeSecret(process.env.GEMINI_API_KEY);
 }
 
+function getGroqKey() {
+  return sanitizeSecret(process.env.GROQ_API_KEY);
+}
+
 function getPassphrase() {
   return sanitizeSecret(process.env.HINA_PASSPHRASE);
+}
+
+function pickBrain(req) {
+  const raw = (req.body?.brain || "gemini").toString().toLowerCase();
+  return raw === "groq" ? "groq" : "gemini";
+}
+
+function brainsAvailable() {
+  return {
+    gemini: Boolean(getApiKey()),
+    groq: Boolean(getGroqKey()),
+  };
 }
 
 function timingSafeEqualStr(a, b) {
@@ -314,15 +336,135 @@ async function callGemini({ apiKey, systemInstruction, contents, generationConfi
   return upstream;
 }
 
+// =============================================================================
+// FASE 8 · CEREBRO ALTERNATIVO (Groq · llama3-70b-8192)
+// =============================================================================
+
+function geminiContentsToOpenAiMessages(systemInstruction, contents) {
+  const messages = [{ role: "system", content: systemInstruction }];
+  for (const c of contents) {
+    const text = (c?.parts || [])
+      .map((p) => (typeof p?.text === "string" ? p.text : ""))
+      .filter(Boolean)
+      .join("\n");
+    if (!text) continue;
+    messages.push({
+      role: c.role === "model" ? "assistant" : "user",
+      content: text,
+    });
+  }
+  return messages;
+}
+
+async function callGroq({ apiKey, systemInstruction, contents, generationConfig }) {
+  const messages = geminiContentsToOpenAiMessages(systemInstruction, contents);
+  const upstream = await fetch(GROQ_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages,
+      temperature: generationConfig?.temperature ?? 0.7,
+      max_tokens: generationConfig?.maxOutputTokens ?? 600,
+    }),
+  });
+  return upstream;
+}
+
+async function extractGroqReply(upstream) {
+  const data = await upstream.json();
+  const reply = data?.choices?.[0]?.message?.content?.trim();
+  return reply || "";
+}
+
+async function extractGeminiReply(upstream) {
+  const data = await upstream.json();
+  return (
+    data?.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text)
+      .filter(Boolean)
+      .join("\n")
+      .trim() || ""
+  );
+}
+
+// Wrapper con redundancia: si el cerebro pedido falla con 401/429/500…,
+// intenta automáticamente con el otro. Devuelve {reply, brainUsed, fellBack}.
+async function callWithFallback({
+  requestedBrain,
+  systemInstruction,
+  contents,
+  generationConfig,
+  forceGemini,
+}) {
+  const keys = { gemini: getApiKey(), groq: getGroqKey() };
+  const order = (() => {
+    if (forceGemini) return ["gemini"]; // multimedia: solo Gemini ve imágenes
+    if (requestedBrain === "groq") return ["groq", "gemini"];
+    return ["gemini", "groq"];
+  })().filter((b) => keys[b]);
+
+  if (!order.length) {
+    return { error: "Ningún cerebro disponible (faltan claves)", status: 500 };
+  }
+
+  let lastErr = null;
+  for (let i = 0; i < order.length; i++) {
+    const brain = order[i];
+    const key = keys[brain];
+    try {
+      const upstream =
+        brain === "groq"
+          ? await callGroq({ apiKey: key, systemInstruction, contents, generationConfig })
+          : await callGemini({ apiKey: key, systemInstruction, contents, generationConfig });
+
+      if (upstream.ok) {
+        const reply =
+          brain === "groq"
+            ? await extractGroqReply(upstream)
+            : await extractGeminiReply(upstream);
+        if (!reply) {
+          lastErr = { error: `Respuesta vacía de ${brain}`, status: 502 };
+          continue;
+        }
+        return {
+          reply,
+          brainUsed: brain,
+          fellBack: brain !== requestedBrain && !forceGemini,
+        };
+      }
+
+      const text = await upstream.text().catch(() => "");
+      console.error(`[${brain}] HTTP`, upstream.status, text.slice(0, 200));
+      lastErr = { error: `${brain} respondió con ${upstream.status}`, status: upstream.status };
+
+      if (!FALLBACK_STATUSES.has(upstream.status)) {
+        // error no recuperable (400 por payload, p.ej.) → no saltes
+        break;
+      }
+    } catch (err) {
+      console.error(`[${brain}] fetch failed`, err);
+      lastErr = { error: `Fallo al contactar a ${brain}: ${err.message}`, status: 500 };
+    }
+  }
+  return lastErr || { error: "Fallo desconocido", status: 500 };
+}
+
 export function createApiApp() {
   const app = express();
   app.use(express.json({ limit: "30mb" }));
 
   app.get("/health", (_req, res) => {
+    const brains = brainsAvailable();
     res.json({
       ok: true,
-      hasGeminiKey: Boolean(getApiKey()),
+      hasGeminiKey: brains.gemini,
+      hasGroqKey: brains.groq,
       hasPassphrase: Boolean(getPassphrase()),
+      brains,
     });
   });
 
@@ -345,13 +487,6 @@ export function createApiApp() {
   });
 
   app.post("/chat", authMiddleware, async (req, res) => {
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      return res
-        .status(500)
-        .json({ error: "GEMINI_API_KEY no está configurada en el servidor" });
-    }
-
     const message =
       typeof req.body?.message === "string" ? req.body.message.trim() : "";
     if (!message) {
@@ -360,6 +495,7 @@ export function createApiApp() {
         .json({ error: "El campo 'message' es obligatorio" });
     }
 
+    const requestedBrain = pickBrain(req);
     const affectionScore = Number(req.body?.affectionScore);
     const level = pickLevel(affectionScore);
     const memory = req.body?.memory || {};
@@ -369,62 +505,33 @@ export function createApiApp() {
 
     console.log("--- /chat ---", {
       msg: message.slice(0, 60),
+      brain: requestedBrain,
       affectionScore: Number.isFinite(affectionScore) ? affectionScore : null,
       level,
       historyLen: historyContents.length,
-      summaries: memory?.summaries?.length || 0,
-      ctx: context
-        ? { time: context.localTime, temp: context.tempC, energy: context.energy }
-        : null,
     });
 
-    try {
-      const upstream = await callGemini({
-        apiKey,
-        systemInstruction,
-        contents: [
-          ...historyContents,
-          { role: "user", parts: [{ text: message }] },
-        ],
-      });
+    const result = await callWithFallback({
+      requestedBrain,
+      systemInstruction,
+      contents: [
+        ...historyContents,
+        { role: "user", parts: [{ text: message }] },
+      ],
+    });
 
-      if (!upstream.ok) {
-        const text = await upstream.text().catch(() => "");
-        console.error("[gemini /chat] HTTP", upstream.status, text.slice(0, 300));
-        if (upstream.status === 429) {
-          return res.status(429).json({ error: "Gemini rate-limited", level });
-        }
-        return res
-          .status(502)
-          .json({ error: `Gemini respondió con ${upstream.status}` });
-      }
-
-      const data = await upstream.json();
-      const reply = data?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .filter(Boolean)
-        .join("\n")
-        .trim();
-
-      if (!reply) {
-        return res.status(502).json({ error: "Respuesta vacía de Gemini" });
-      }
-
-      res.json({ reply, level });
-    } catch (err) {
-      console.error("[gemini /chat] fetch failed", err);
-      res.status(500).json({ error: "Fallo al contactar a Gemini" });
+    if (result.error) {
+      return res.status(result.status || 500).json({ error: result.error, level });
     }
+    res.json({
+      reply: result.reply,
+      level,
+      brainUsed: result.brainUsed,
+      fellBack: result.fellBack,
+    });
   });
 
   app.post("/analyze", authMiddleware, async (req, res) => {
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      return res
-        .status(500)
-        .json({ error: "GEMINI_API_KEY no está configurada en el servidor" });
-    }
-
     const message =
       typeof req.body?.message === "string" ? req.body.message : "";
     const files = Array.isArray(req.body?.files) ? req.body.files : [];
@@ -433,17 +540,20 @@ export function createApiApp() {
       return res.status(400).json({ error: "No hay archivos ni mensaje." });
     }
 
+    const requestedBrain = pickBrain(req);
     const affectionScore = Number(req.body?.affectionScore);
     const level = pickLevel(affectionScore);
     const memory = req.body?.memory || {};
     const context = req.body?.context || null;
     const cameraEmpathy = Boolean(req.body?.cameraEmpathy);
-    const systemInstruction = buildSystemPrompt(
-      level,
-      memory,
-      context,
-      cameraEmpathy,
-    );
+    const academicHint = [
+      "MODO ANALISTA ACADÉMICO: el usuario te ha pasado material de estudio (PDF, código, imagen, audio, etc.).",
+      "Si hay matemáticas o problemas, RESUÉLVELOS PASO A PASO con explicación clara.",
+      "Si es código, identifica qué hace, sugiere mejoras y advierte de bugs.",
+      "Si es un PDF/texto, resume lo esencial y, si pide ejercicios, guíalo razonando.",
+    ].join(" ");
+    const baseSystem = buildSystemPrompt(level, memory, context, cameraEmpathy);
+    const systemInstruction = `${baseSystem}\n\n${academicHint}`;
 
     let parts;
     try {
@@ -455,51 +565,39 @@ export function createApiApp() {
         .json({ error: "No se pudieron procesar los archivos." });
     }
 
+    // Si hay material multimedia (imagen/audio/video), forzamos Gemini porque
+    // Llama-3 70b en Groq es solo de texto y no puede "ver" ni "oír".
+    const hasMultimodal = files.some((f) => {
+      const m = (f?.mime || "").toLowerCase();
+      return INLINE_OK_PREFIXES.some((p) => m.startsWith(p));
+    });
+
     console.log("--- /analyze ---", {
       msg: message.slice(0, 60),
       filesCount: files.length,
       partsCount: parts.length,
+      brain: requestedBrain,
+      forceGemini: hasMultimodal,
       level,
     });
 
-    try {
-      const upstream = await callGemini({
-        apiKey,
-        systemInstruction,
-        contents: [{ role: "user", parts }],
-      });
+    const result = await callWithFallback({
+      requestedBrain,
+      systemInstruction,
+      contents: [{ role: "user", parts }],
+      forceGemini: hasMultimodal,
+    });
 
-      if (!upstream.ok) {
-        const text = await upstream.text().catch(() => "");
-        console.error(
-          "[gemini /analyze] HTTP",
-          upstream.status,
-          text.slice(0, 300),
-        );
-        if (upstream.status === 429) {
-          return res.status(429).json({ error: "Gemini rate-limited", level });
-        }
-        return res
-          .status(502)
-          .json({ error: `Gemini respondió con ${upstream.status}` });
-      }
-
-      const data = await upstream.json();
-      const reply = data?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .filter(Boolean)
-        .join("\n")
-        .trim();
-
-      if (!reply) {
-        return res.status(502).json({ error: "Respuesta vacía de Gemini" });
-      }
-
-      res.json({ reply, level });
-    } catch (err) {
-      console.error("[gemini /analyze] fetch failed", err);
-      res.status(500).json({ error: "Fallo al contactar a Gemini" });
+    if (result.error) {
+      return res.status(result.status || 500).json({ error: result.error, level });
     }
+    res.json({
+      reply: result.reply,
+      level,
+      brainUsed: result.brainUsed,
+      fellBack: result.fellBack,
+      forcedGemini: Boolean(hasMultimodal),
+    });
   });
 
   app.post("/summarize", authMiddleware, async (req, res) => {

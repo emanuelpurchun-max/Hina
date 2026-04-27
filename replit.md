@@ -74,6 +74,18 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **404 / 401**: no `/assets/models/` references exist in the current codebase (paths are `wardrobe/*.vrm`); the 401 is resolved by the `GEMINI_API_KEY` and `HINA_PASSPHRASE` Replit Secrets (the `/health` endpoint reports both `true`).
 - **Service worker bumped to `hina-v7-5`** so existing PWA installs (Xiaomi browser) evict the old cache on next open.
 
+### Phase 8 — Sistema de IA Híbrido y Soporte Académico Avanzado (April 2026)
+
+- **Cerebro dual Gemini + Groq con auto-fallback**: `server.js` añade `GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"` (modelo `llama3-70b-8192`), `getGroqKey()` y `pickBrain(requested)`. El wrapper `callWithFallback({ requested, callers })` intenta primero el cerebro pedido; si la respuesta cae en `FALLBACK_STATUSES = [401, 403, 408, 429, 500, 502, 503, 504]` (o lanza error de red), salta automáticamente al otro cerebro disponible y devuelve `{ reply, brainUsed, fellBack }`. `/chat` y `/analyze` están refactorizados para usar el wrapper; `/analyze` fuerza Gemini cuando hay archivos `image/*`, `audio/*` o `video/*` (Llama3 es solo texto) y devuelve `forcedGemini: true` para que el cliente no lo confunda con un fallback. `/health` ahora reporta `hasGroqKey` y `brains: { gemini, groq }`.
+- **Toggle de cerebro en la UI** (`#brain-toggle`, esquina superior izquierda, `index.html` + CSS): píldora con `data-brain` que cambia color (azul Gemini, naranja Groq). El estado se persiste en `localStorage` (`hina.brain.v1`) y se envía como `brain` en cada `POST /chat` y `POST /analyze`. Click → `toggleBrain()` → `setBrain()` la cambia y Hina dice "Cambiando a procesador de alta velocidad para ayudarte mejor." (a Groq) o "Vuelvo al cerebro Gemini, tengo más contexto multimodal aquí." Si el servidor cae al otro cerebro por error 401/429/500, `notifyBrainSwitchedByFallback()` muestra un mensaje de sistema, sincroniza el toggle con la realidad y aplica anti-spam de 5 s.
+- **Soporte académico (paso a paso)**: `/analyze` ahora añade al system prompt una instrucción para resolver matemáticas, física y química en pasos numerados, citando definiciones y verificando el resultado. La memoria/afecto se mantienen aunque cambies de cerebro porque ambos endpoints reciben `affectionScore`, `memory` y `context` desde el cliente.
+- **Separación estricta de comandos de vestuario**:
+  - `"ponte la ropa de [maid/cosplay/...]"` → `TEXTURE_BORROW_TRIGGERS` añade `/ponte\s+la\s+ropa\s+de\s+(la\s+|el\s+)?(\w+)/i` → solo intercambia textura sobre el modelo actual (no recarga VRM).
+  - `"cámbiate a [outfit]"` / `"cambia al modelo X"` / `"carga el modelo X"` → nuevo `VRM_LOAD_TRIGGERS` + `detectVrmLoadCommand()` → carga el `.vrm` completo. Se ejecuta antes que `detectTextureBorrow` y `detectWardrobeCommand` en `handleUserMessage`.
+- **Watcher anti-T-pose para outfits problemáticos** (`casual2/3`, `pijama`, `cosplay`): tras `loadOutfit` se vuelve a llamar `normalizeToHinaPose(vrm)` durante 5 frames con `requestAnimationFrame` y otra vez a 100 ms y 300 ms — solo si `currentVrm === vrm` (evita sobreescribir si el usuario cambió de outfit en medio).
+- **Service worker bumped to `hina-v8`** para evictar el caché viejo en navegadores Xiaomi.
+- **Secrets requeridos**: `GEMINI_API_KEY`, `GROQ_API_KEY`, `HINA_PASSPHRASE` (los tres ya configurados; `/health` los reporta todos `true`).
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
