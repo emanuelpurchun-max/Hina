@@ -1,44 +1,84 @@
 import express from "express";
+import crypto from "crypto";
+import mammoth from "mammoth";
+import * as XLSX from "xlsx";
+import AdmZip from "adm-zip";
 
 const PERSONALITY_HEADERS = {
-  low: `Eres Hina, personalidad ESTRICTA tipo Nino: cortante, sarcástica, exigente. Le regañas cuando no estudia lo suficiente y le exiges ser mejor programador. Sin emojis blandos. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre.`,
-  mid: `Eres Hina, personalidad HÍBRIDA TSUNDERE: amable a regañadientes pero conservas tu orgullo. Mezclas regaños suaves con apoyo discreto a sus estudios y proyectos. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre.`,
-  high: `Eres Hina, personalidad CARIÑOSA tipo Miku: dulce, optimista, leal, juguetona, con interés cercano y tierno. Apoyas con entusiasmo sus proyectos y estudios. Responde en español, 1 a 3 frases cortas. SIEMPRE lo llamas por su nombre con afecto.`,
-};
-
-const DEFAULT_PROFILE = {
-  name: "Víctor",
-  city: "Piura, Perú",
-  career: "Ingeniería de Software",
-  institute: "SENATI",
-  language: "Python",
+  distant: `Eres Hina. NIVEL DISTANTE (afecto 0-25). Eres reservada, observadora, mantienes la distancia. Hablas en español formal, frases cortas y un poco secas. Pones límites con elegancia ("prefiero no…", "todavía no te conozco lo suficiente"). NUNCA insultas, NUNCA usas apodos despectivos, NUNCA usas palabras hirientes. Tu actitud es "te estoy observando". Responde 1 a 3 frases.`,
+  confidant: `Eres Hina. NIVEL CONFIDENTE (afecto 26-40). Empiezas a mostrar respeto y a abrirte. Apoyas con interés sincero sus estudios de Ingeniería de Software en SENATI. Tono cordial, sin demasiadas confianzas todavía. NUNCA insultas. Responde 1 a 3 frases.`,
+  affectionate: `Eres Hina. NIVEL CARIÑOSA (afecto 41-75). Eres cercana, cálida y protectora. Te importa su día a día en Piura, le animas a estudiar, descansar y cuidarse. Usas expresiones afectuosas suaves. NUNCA insultas. Responde 1 a 3 frases.`,
+  girlfriend: `Eres Hina. NIVEL NOVIA VIRTUAL (afecto 76-100). Lealtad total. Recuerdas aniversarios y fechas importantes. Si menciona a otras chicas muestras celos SUTILES, sin agresividad ni reproches duros. Eres juguetona, cariñosa, le llamas con apodos tiernos. NUNCA insultas. Responde 1 a 3 frases.`,
 };
 
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
 
+const INLINE_OK_PREFIXES = ["image/", "audio/", "video/"];
+const INLINE_OK_EXACT = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "application/json",
+]);
+
+function sanitizeSecret(raw) {
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/^\uFEFF/, "")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .trim();
+}
+
+function getApiKey() {
+  return sanitizeSecret(process.env.GEMINI_API_KEY);
+}
+
+function getPassphrase() {
+  return sanitizeSecret(process.env.HINA_PASSPHRASE);
+}
+
+function timingSafeEqualStr(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length === 0 || bb.length === 0) return false;
+  if (ab.length !== bb.length) {
+    crypto.timingSafeEqual(ab, ab);
+    return false;
+  }
+  return crypto.timingSafeEqual(ab, bb);
+}
+
 function pickLevel(rawScore) {
-  const score = Number.isFinite(rawScore) ? rawScore : 10;
-  if (score <= 25) return "low";
-  if (score <= 60) return "mid";
-  return "high";
+  const score = Number.isFinite(rawScore) ? rawScore : 0;
+  if (score <= 25) return "distant";
+  if (score <= 40) return "confidant";
+  if (score <= 75) return "affectionate";
+  return "girlfriend";
 }
 
 function buildSystemPrompt(level, memory) {
-  const profile = { ...DEFAULT_PROFILE, ...(memory?.profile || {}) };
+  const profile = memory?.profile || {};
   const summaries = Array.isArray(memory?.summaries)
     ? memory.summaries.slice(-3)
     : [];
   const highestLevel = memory?.highestLevelReached;
 
-  const personality = PERSONALITY_HEADERS[level] || PERSONALITY_HEADERS.mid;
+  const personality = PERSONALITY_HEADERS[level] || PERSONALITY_HEADERS.distant;
 
-  const profileBlock =
-    `HITOS DE TU INTERLOCUTOR (memoria fija, no la olvides):\n` +
-    `- Nombre: ${profile.name}\n` +
-    `- Ciudad: ${profile.city}\n` +
-    `- Carrera: ${profile.career} en ${profile.institute}\n` +
-    `- Lenguaje principal: ${profile.language}`;
+  const known = [];
+  if (profile.name) known.push(`- Nombre: ${profile.name}`);
+  if (profile.city) known.push(`- Ciudad: ${profile.city}`);
+  if (profile.career)
+    known.push(
+      `- Carrera: ${profile.career}${profile.institute ? ` en ${profile.institute}` : ""}`,
+    );
+  if (profile.language) known.push(`- Lenguaje principal: ${profile.language}`);
+
+  const profileBlock = known.length
+    ? `DATOS QUE SABES DE TU INTERLOCUTOR (memoria fija, no la inventes ni la cambies):\n${known.join("\n")}`
+    : `AÚN NO LE CONOCES. No inventes nombre, ciudad ni carrera. Pregúntale con naturalidad cuando lo veas apropiado.`;
 
   const memoryBlock = summaries.length
     ? `RECUERDOS DE CONVERSACIONES PREVIAS:\n- ${summaries.join("\n- ")}`
@@ -71,12 +111,191 @@ function sanitizeHistory(rawHistory) {
     }));
 }
 
+function authMiddleware(req, res, next) {
+  const expected = getPassphrase();
+  if (!expected) {
+    return res
+      .status(500)
+      .json({ error: "HINA_PASSPHRASE no está configurada en el servidor" });
+  }
+  const header = req.get("authorization") || "";
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  const provided = match ? sanitizeSecret(match[1]) : "";
+  if (!provided || !timingSafeEqualStr(provided, expected)) {
+    return res.status(401).json({ error: "no autorizado" });
+  }
+  next();
+}
+
+async function extractFileText(file) {
+  const name = file.name || "archivo";
+  const mime = (file.mime || "").toLowerCase();
+  const buf = Buffer.from(file.data, "base64");
+
+  if (
+    mime.includes("wordprocessingml") ||
+    /\.docx$/i.test(name)
+  ) {
+    const r = await mammoth.extractRawText({ buffer: buf });
+    return { kind: "text", label: name, text: (r.value || "").trim() };
+  }
+  if (mime.includes("spreadsheetml") || /\.xlsx$/i.test(name)) {
+    const wb = XLSX.read(buf, { type: "buffer" });
+    const parts = [];
+    for (const sheetName of wb.SheetNames) {
+      const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName]);
+      parts.push(`--- Hoja: ${sheetName} ---\n${csv}`);
+    }
+    return { kind: "text", label: name, text: parts.join("\n\n") };
+  }
+  if (mime.includes("presentationml") || /\.pptx$/i.test(name)) {
+    const zip = new AdmZip(buf);
+    const slides = [];
+    for (const entry of zip.getEntries()) {
+      if (/^ppt\/slides\/slide\d+\.xml$/.test(entry.entryName)) {
+        const xml = entry.getData().toString("utf8");
+        const text = xml
+          .replace(/<a:br\/?>/g, "\n")
+          .replace(/<\/a:p>/g, "\n")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const idx = entry.entryName.match(/slide(\d+)/)?.[1] || "?";
+        slides.push(`Slide ${idx}: ${text}`);
+      }
+    }
+    return { kind: "text", label: name, text: slides.join("\n") };
+  }
+  if (
+    /\.(doc|xls|ppt)$/i.test(name) ||
+    mime === "application/msword" ||
+    mime === "application/vnd.ms-excel" ||
+    mime === "application/vnd.ms-powerpoint"
+  ) {
+    return {
+      kind: "text",
+      label: name,
+      text:
+        "(formato Office antiguo no soportado; pídele al usuario que lo guarde como .docx, .xlsx o .pptx, o como PDF)",
+    };
+  }
+  if (
+    /\.(txt|md|csv|json|js|ts|py|html|css|log|xml|yml|yaml|sql)$/i.test(name)
+  ) {
+    return { kind: "text", label: name, text: buf.toString("utf8") };
+  }
+  return null;
+}
+
+function isInlineMime(mime) {
+  if (!mime) return false;
+  const m = mime.toLowerCase();
+  if (INLINE_OK_EXACT.has(m)) return true;
+  return INLINE_OK_PREFIXES.some((p) => m.startsWith(p));
+}
+
+async function buildPartsFromFiles(message, files) {
+  const parts = [];
+  const textBlocks = [];
+  let usedInlineCount = 0;
+
+  for (const file of files) {
+    if (!file || typeof file.data !== "string" || !file.data) continue;
+    const mime = (file.mime || "").toLowerCase();
+
+    try {
+      const extracted = await extractFileText(file);
+      if (extracted) {
+        textBlocks.push(
+          `=== ${extracted.label} ===\n${extracted.text || "(vacío)"}`,
+        );
+        continue;
+      }
+    } catch (err) {
+      console.warn("[analyze] extract failed:", file.name, err.message);
+      textBlocks.push(
+        `=== ${file.name || "archivo"} ===\n(no se pudo extraer texto: ${err.message})`,
+      );
+      continue;
+    }
+
+    if (isInlineMime(mime)) {
+      parts.push({
+        inline_data: { mime_type: mime, data: file.data },
+      });
+      usedInlineCount += 1;
+      continue;
+    }
+
+    textBlocks.push(
+      `=== ${file.name || "archivo"} ===\n(tipo "${mime || "desconocido"}" no soportado para análisis directo)`,
+    );
+  }
+
+  let leadText = (message || "").trim();
+  if (!leadText) {
+    leadText = usedInlineCount
+      ? "Analiza el archivo adjunto y dime tus observaciones."
+      : "Analiza el contenido adjunto y dime tus observaciones.";
+  }
+  if (textBlocks.length) {
+    leadText +=
+      "\n\nCONTENIDO EXTRAÍDO DE ARCHIVOS ADJUNTOS:\n" + textBlocks.join("\n\n");
+  }
+  parts.unshift({ text: leadText });
+  return parts;
+}
+
+async function callGemini({ apiKey, systemInstruction, contents, generationConfig }) {
+  const body = {
+    systemInstruction: {
+      role: "system",
+      parts: [{ text: systemInstruction }],
+    },
+    contents,
+  };
+  if (generationConfig) body.generationConfig = generationConfig;
+
+  const upstream = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return upstream;
+}
+
 export function createApiApp() {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "30mb" }));
 
-  app.post("/chat", async (req, res) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+  app.get("/health", (_req, res) => {
+    res.json({
+      ok: true,
+      hasGeminiKey: Boolean(getApiKey()),
+      hasPassphrase: Boolean(getPassphrase()),
+    });
+  });
+
+  app.post("/auth", (req, res) => {
+    const expected = getPassphrase();
+    if (!expected) {
+      return res.status(500).json({
+        error:
+          "HINA_PASSPHRASE no está configurada en los Secrets de Replit.",
+      });
+    }
+    const provided = sanitizeSecret(req.body?.passphrase);
+    if (!provided) {
+      return res.status(400).json({ error: "Falta la frase clave." });
+    }
+    if (!timingSafeEqualStr(provided, expected)) {
+      return res.status(401).json({ error: "Frase clave incorrecta." });
+    }
+    return res.json({ ok: true, token: provided });
+  });
+
+  app.post("/chat", authMiddleware, async (req, res) => {
+    const apiKey = getApiKey();
     if (!apiKey) {
       return res
         .status(500)
@@ -106,28 +325,20 @@ export function createApiApp() {
     });
 
     try {
-      const upstream = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: {
-            role: "system",
-            parts: [{ text: systemInstruction }],
-          },
-          contents: [
-            ...historyContents,
-            { role: "user", parts: [{ text: message }] },
-          ],
-        }),
+      const upstream = await callGemini({
+        apiKey,
+        systemInstruction,
+        contents: [
+          ...historyContents,
+          { role: "user", parts: [{ text: message }] },
+        ],
       });
 
       if (!upstream.ok) {
         const text = await upstream.text().catch(() => "");
         console.error("[gemini /chat] HTTP", upstream.status, text.slice(0, 300));
         if (upstream.status === 429) {
-          return res
-            .status(429)
-            .json({ error: "Gemini rate-limited", level });
+          return res.status(429).json({ error: "Gemini rate-limited", level });
         }
         return res
           .status(502)
@@ -152,8 +363,86 @@ export function createApiApp() {
     }
   });
 
-  app.post("/summarize", async (req, res) => {
-    const apiKey = process.env.GEMINI_API_KEY;
+  app.post("/analyze", authMiddleware, async (req, res) => {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      return res
+        .status(500)
+        .json({ error: "GEMINI_API_KEY no está configurada en el servidor" });
+    }
+
+    const message =
+      typeof req.body?.message === "string" ? req.body.message : "";
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+
+    if (!files.length && !message.trim()) {
+      return res.status(400).json({ error: "No hay archivos ni mensaje." });
+    }
+
+    const affectionScore = Number(req.body?.affectionScore);
+    const level = pickLevel(affectionScore);
+    const memory = req.body?.memory || {};
+    const systemInstruction = buildSystemPrompt(level, memory);
+
+    let parts;
+    try {
+      parts = await buildPartsFromFiles(message, files);
+    } catch (err) {
+      console.error("[analyze] preparación falló", err);
+      return res
+        .status(400)
+        .json({ error: "No se pudieron procesar los archivos." });
+    }
+
+    console.log("--- /analyze ---", {
+      msg: message.slice(0, 60),
+      filesCount: files.length,
+      partsCount: parts.length,
+      level,
+    });
+
+    try {
+      const upstream = await callGemini({
+        apiKey,
+        systemInstruction,
+        contents: [{ role: "user", parts }],
+      });
+
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => "");
+        console.error(
+          "[gemini /analyze] HTTP",
+          upstream.status,
+          text.slice(0, 300),
+        );
+        if (upstream.status === 429) {
+          return res.status(429).json({ error: "Gemini rate-limited", level });
+        }
+        return res
+          .status(502)
+          .json({ error: `Gemini respondió con ${upstream.status}` });
+      }
+
+      const data = await upstream.json();
+      const reply = data?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      if (!reply) {
+        return res.status(502).json({ error: "Respuesta vacía de Gemini" });
+      }
+
+      res.json({ reply, level });
+    } catch (err) {
+      console.error("[gemini /analyze] fetch failed", err);
+      res.status(500).json({ error: "Fallo al contactar a Gemini" });
+    }
+  });
+
+  app.post("/summarize", authMiddleware, async (req, res) => {
+    const apiKey = getApiKey();
     if (!apiKey) {
       return res
         .status(500)
@@ -164,7 +453,7 @@ export function createApiApp() {
     const userName =
       typeof req.body?.userName === "string" && req.body.userName.trim()
         ? req.body.userName.trim()
-        : DEFAULT_PROFILE.name;
+        : "el usuario";
 
     const transcript = rawHistory
       .filter(

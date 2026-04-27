@@ -106,9 +106,31 @@
         align-items: center;
         gap: 8px;
       }
+      .chat-message.system {
+        align-self: center;
+        font-size: 12px;
+        opacity: 0.75;
+        font-style: italic;
+        background: rgba(255, 255, 255, 0.03);
+      }
       .chat-message.bot .bubble-text {
         flex: 1 1 auto;
         min-width: 0;
+      }
+      .chat-attachment {
+        margin-top: 6px;
+        font-size: 12px;
+        opacity: 0.85;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .chat-attachment .att-thumb {
+        max-width: 200px;
+        max-height: 140px;
+        border-radius: 8px;
+        margin-top: 4px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
       }
       .play-btn {
         flex-shrink: 0;
@@ -139,6 +161,51 @@
         fill: #fff;
         display: block;
         margin-left: 1px;
+      }
+
+      #attachment-preview {
+        display: none;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        backdrop-filter: blur(5px);
+        -webkit-backdrop-filter: blur(5px);
+        pointer-events: auto;
+      }
+      #attachment-preview.visible {
+        display: flex;
+      }
+      .attachment-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px 4px 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        font-size: 12px;
+        max-width: 220px;
+      }
+      .attachment-chip .att-name {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .attachment-chip button {
+        background: transparent;
+        border: none;
+        color: #fff;
+        cursor: pointer;
+        padding: 0 4px;
+        font-size: 14px;
+        line-height: 1;
+        opacity: 0.7;
+      }
+      .attachment-chip button:hover {
+        opacity: 1;
       }
 
       #chat-bar {
@@ -174,6 +241,15 @@
       }
       .chat-btn:active {
         transform: scale(0.94);
+      }
+      .chat-btn.recording {
+        background: rgba(255, 70, 70, 0.6);
+        border-color: rgba(255, 200, 200, 0.5);
+        animation: pulse 1.2s infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255, 70, 70, 0.5); }
+        50%      { box-shadow: 0 0 0 8px rgba(255, 70, 70, 0); }
       }
       .chat-btn svg {
         width: 20px;
@@ -217,6 +293,80 @@
         #chat-input {
           font-size: 14px;
         }
+      }
+
+      #lock-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(10, 10, 25, 0.85);
+        backdrop-filter: blur(14px) saturate(140%);
+        -webkit-backdrop-filter: blur(14px) saturate(140%);
+      }
+      #lock-overlay.hidden {
+        display: none;
+      }
+      .lock-card {
+        width: min(380px, calc(100% - 40px));
+        padding: 28px 26px 24px;
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        text-align: center;
+      }
+      .lock-title {
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      .lock-hint {
+        margin-top: 6px;
+        margin-bottom: 18px;
+        font-size: 13px;
+        opacity: 0.75;
+      }
+      .lock-form {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .lock-input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
+        font-size: 15px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(0, 0, 0, 0.25);
+        color: #fff;
+        outline: none;
+      }
+      .lock-input:focus {
+        border-color: rgba(176, 107, 255, 0.7);
+        box-shadow: 0 0 0 2px rgba(176, 107, 255, 0.25);
+      }
+      .lock-btn {
+        padding: 12px 18px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        background: linear-gradient(135deg, #6a8bff, #b06bff);
+        color: #fff;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .lock-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .lock-error {
+        min-height: 16px;
+        font-size: 12px;
+        color: #ffb4b4;
       }
 
       #start-overlay {
@@ -268,6 +418,26 @@
     </script>
   </head>
   <body>
+    <div id="lock-overlay" role="dialog" aria-modal="true" aria-labelledby="lock-title">
+      <div class="lock-card">
+        <div class="lock-title" id="lock-title">Hina AI · Acceso Privado</div>
+        <div class="lock-hint">Escribe la frase clave para activar el chat y el modelo.</div>
+        <form class="lock-form" id="lock-form" autocomplete="off">
+          <input
+            id="lock-input"
+            class="lock-input"
+            type="password"
+            placeholder="Frase clave"
+            aria-label="Frase clave"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="submit" class="lock-btn" id="lock-btn">Entrar</button>
+          <div class="lock-error" id="lock-error" role="alert"></div>
+        </form>
+      </div>
+    </div>
+
     <div id="start-overlay" role="button" tabindex="0" aria-label="Toca para iniciar a Hina">
       <div class="start-overlay-card">
         <div class="start-overlay-title">Toca para iniciar a Hina</div>
@@ -275,20 +445,28 @@
       </div>
     </div>
 
-    <div id="info">Cargando personaje.vrm…</div>
+    <div id="info">Esperando acceso…</div>
 
     <div id="chat-container">
       <div id="chat-log"></div>
 
+      <div id="attachment-preview" aria-live="polite"></div>
+
       <form id="chat-bar" autocomplete="off">
-        <button type="button" class="chat-btn" id="camera-btn" aria-label="Adjuntar imagen">
+        <button type="button" class="chat-btn" id="camera-btn" aria-label="Tomar foto con la cámara" title="Cámara">
           <svg viewBox="0 0 24 24">
             <path d="M4 7h3l2-2h6l2 2h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z" />
             <circle cx="12" cy="13" r="4" />
           </svg>
         </button>
 
-        <button type="button" class="chat-btn" id="mic-btn" aria-label="Grabar audio">
+        <button type="button" class="chat-btn" id="file-btn" aria-label="Adjuntar archivo" title="Adjuntar PDF, Word, Excel, PPT, audio…">
+          <svg viewBox="0 0 24 24">
+            <path d="M21 12.5l-8.5 8.5a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.19 9.19a2 2 0 0 1-2.83-2.83l8.49-8.49" />
+          </svg>
+        </button>
+
+        <button type="button" class="chat-btn" id="mic-btn" aria-label="Grabar audio" title="Grabar audio">
           <svg viewBox="0 0 24 24">
             <rect x="9" y="3" width="6" height="12" rx="3" />
             <path d="M5 11a7 7 0 0 0 14 0" />
@@ -310,6 +488,15 @@
       </form>
     </div>
 
+    <input type="file" id="camera-input" accept="image/*" capture="environment" hidden />
+    <input
+      type="file"
+      id="file-input"
+      hidden
+      multiple
+      accept="image/*,application/pdf,audio/*,text/plain,text/csv,application/json,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.txt"
+    />
+
     <script type="module" src="/script.js"></script>
     <script>
       if ("serviceWorker" in navigator) {
@@ -327,4 +514,3 @@
     </script>
   </body>
 </html>
-#actualizaciones 

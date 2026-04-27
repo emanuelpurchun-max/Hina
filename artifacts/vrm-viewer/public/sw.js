@@ -1,4 +1,4 @@
-const CACHE_VERSION = "hina-v1";
+const CACHE_VERSION = "hina-v3";
 
 const PRECACHE_URLS = [
   "./",
@@ -48,7 +48,15 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
 
-  if (url.pathname.endsWith("/chat")) return;
+  if (
+    url.pathname.endsWith("/chat") ||
+    url.pathname.endsWith("/auth") ||
+    url.pathname.endsWith("/analyze") ||
+    url.pathname.endsWith("/summarize") ||
+    url.pathname.endsWith("/health")
+  ) {
+    return;
+  }
 
   const isCDN =
     url.hostname === "cdn.jsdelivr.net" || url.hostname === "unpkg.com";

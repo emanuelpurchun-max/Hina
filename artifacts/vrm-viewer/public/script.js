@@ -3,13 +3,67 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
-const CHAT_ENDPOINT = "/chat";
+// =============================================================================
+// FASE 1 · ACCESO PRIVADO (frase clave)
+// =============================================================================
 
-const AFFECT_STORAGE_KEY = "hina.affection.v1";
+const AUTH_STORAGE_KEY = "hina.auth.token.v1";
+const AUTH_ENDPOINT = "/auth";
+const CHAT_ENDPOINT = "/chat";
+const ANALYZE_ENDPOINT = "/analyze";
+const SUMMARIZE_ENDPOINT = "/summarize";
+
+let authToken = null;
+
+function loadStoredAuth() {
+  try {
+    const v = localStorage.getItem(AUTH_STORAGE_KEY);
+    if (typeof v === "string" && v.trim().length > 0) authToken = v.trim();
+  } catch (err) {
+    console.warn("[auth] no se pudo leer localStorage:", err);
+  }
+}
+
+function persistAuth(token) {
+  try {
+    if (token) localStorage.setItem(AUTH_STORAGE_KEY, token);
+    else localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch (err) {
+    console.warn("[auth] no se pudo guardar localStorage:", err);
+  }
+}
+
+function authHeaders(extra = {}) {
+  return authToken
+    ? { Authorization: `Bearer ${authToken}`, ...extra }
+    : { ...extra };
+}
+
+async function verifyPassphrase(passphrase) {
+  const response = await fetch(AUTH_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ passphrase }),
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const msg = data?.error || `HTTP ${response.status}`;
+    throw new Error(msg);
+  }
+  if (!data?.token) throw new Error("Respuesta sin token");
+  return data.token;
+}
+
+// =============================================================================
+// FASE 2 · AFECTO 4 NIVELES (sin insultos)
+// =============================================================================
+
+const AFFECT_STORAGE_KEY = "hina.affection.v2";
 const AFFECT_MIN = 0;
 const AFFECT_MAX = 100;
+const AFFECT_INITIAL = 0;
 const AFFECT_KIND_DELTA = 2;
-const AFFECT_INSULT_DELTA = -3;
+const AFFECT_GIFT_DELTA = 10;
 const AFFECT_DECAY_PER_MINUTE = 0.1;
 const AFFECT_DECAY_GRACE_MIN = 5;
 
@@ -17,22 +71,15 @@ const KIND_WORDS = [
   "gracias", "por favor", "te quiero", "te amo", "amor", "cariño", "carino",
   "linda", "bonita", "hermosa", "preciosa", "encantadora", "guapa",
   "eres genial", "increíble", "increible", "fantástica", "fantastica",
-  "perfecta", "buena chica", "querida", "mejor", "amiga", "te adoro",
-  "feliz", "buenos días", "buenos dias", "buenas noches",
+  "perfecta", "querida", "te adoro",
+  "feliz", "buenos días", "buenos dias", "buenas noches", "buenas tardes",
 ];
 
-const INSULT_WORDS = [
-  "tonta", "estupida", "estúpida", "idiota", "imbecil", "imbécil",
-  "fea", "inútil", "inutil", "mierda", "puta", "callate", "cállate",
-  "odio", "te odio", "basura", "mala", "fastidias", "jodete", "jódete",
-  "muerete", "muérete", "asco",
-];
-
-let affectionScore = 10;
+let affectionScore = AFFECT_INITIAL;
 let affectionLastInteractionAt = Date.now();
 
 function clampAffection(n) {
-  if (!Number.isFinite(n)) return 10;
+  if (!Number.isFinite(n)) return AFFECT_INITIAL;
   return Math.max(AFFECT_MIN, Math.min(AFFECT_MAX, Math.round(n * 100) / 100));
 }
 
@@ -85,36 +132,49 @@ function evaluateSentiment(text) {
   const t = (text || "").toLowerCase();
   let delta = 0;
   let kindHit = null;
-  let insultHit = null;
   for (const w of KIND_WORDS) {
-    if (t.includes(w)) { kindHit = w; delta += AFFECT_KIND_DELTA; break; }
+    if (t.includes(w)) {
+      kindHit = w;
+      delta += AFFECT_KIND_DELTA;
+      break;
+    }
   }
-  for (const w of INSULT_WORDS) {
-    if (t.includes(w)) { insultHit = w; delta += AFFECT_INSULT_DELTA; break; }
-  }
-  return { delta, kindHit, insultHit };
+  return { delta, kindHit };
 }
 
-function updateAffection(userText) {
-  applyInactivityDecay();
-  const { delta, kindHit, insultHit } = evaluateSentiment(userText);
-  if (delta !== 0) {
-    const before = affectionScore;
-    affectionScore = clampAffection(affectionScore + delta);
-    console.log(
-      `[affect] ${delta > 0 ? "+" : ""}${delta} (${kindHit || ""}${insultHit ? " / " + insultHit : ""}) → ${before} → ${affectionScore}`,
-    );
-  }
+function bumpAffection(delta, reason = "") {
+  if (!Number.isFinite(delta) || delta === 0) return;
+  const before = affectionScore;
+  affectionScore = clampAffection(affectionScore + delta);
+  console.log(
+    `[affect] ${delta > 0 ? "+" : ""}${delta} (${reason}) → ${before} → ${affectionScore}`,
+  );
   affectionLastInteractionAt = Date.now();
   persistAffection();
   updateMemoryAffectionPeak();
 }
 
-function affectionLevel(score = affectionScore) {
-  if (score <= 25) return "low";
-  if (score <= 60) return "mid";
-  return "high";
+function registerInteraction(userText) {
+  applyInactivityDecay();
+  const { delta, kindHit } = evaluateSentiment(userText);
+  if (delta !== 0) bumpAffection(delta, kindHit || "");
+  affectionLastInteractionAt = Date.now();
+  persistAffection();
 }
+
+function affectionLevel(score = affectionScore) {
+  if (score <= 25) return "distant";
+  if (score <= 40) return "confidant";
+  if (score <= 75) return "affectionate";
+  return "girlfriend";
+}
+
+const LEVEL_LABEL_ES = {
+  distant: "Distante",
+  confidant: "Confidente",
+  affectionate: "Cariñosa",
+  girlfriend: "Novia virtual",
+};
 
 loadAffection();
 applyInactivityDecay();
@@ -122,21 +182,21 @@ console.log(
   `[affect] inicio: score=${affectionScore} nivel=${affectionLevel()}`,
 );
 
-const MEMORY_STORAGE_KEY = "hina.memory.v1";
+// =============================================================================
+// FASE 2 · MEMORIA RESETEADA (Hina no sabe nada del usuario)
+// =============================================================================
+
+const MEMORY_STORAGE_KEY = "hina.memory.v2";
 const MEMORY_MAX_SUMMARIES = 10;
 const HISTORY_WINDOW = 3;
 const SUMMARY_EVERY_N_USER_MSGS = 10;
 
 const DEFAULT_MEMORY = {
   profile: {
-    name: "Víctor",
-    city: "Piura, Perú",
-    career: "Ingeniería de Software",
-    institute: "SENATI",
-    language: "Python",
+    // En blanco a propósito: Hina te conocerá desde cero.
   },
-  highestAffectionReached: 10,
-  highestLevelReached: "low",
+  highestAffectionReached: AFFECT_INITIAL,
+  highestLevelReached: "distant",
   summaries: [],
   totalUserMessages: 0,
 };
@@ -174,9 +234,10 @@ function updateMemoryAffectionPeak() {
     memory.highestAffectionReached = affectionScore;
     changed = true;
   }
-  const ranking = { low: 0, mid: 1, high: 2 };
+  const ranking = { distant: 0, confidant: 1, affectionate: 2, girlfriend: 3 };
   if (
-    ranking[level] > ranking[memory.highestLevelReached || "low"]
+    (ranking[level] ?? 0) >
+    (ranking[memory.highestLevelReached || "distant"] ?? 0)
   ) {
     memory.highestLevelReached = level;
     changed = true;
@@ -211,6 +272,10 @@ function pushHistory(role, text) {
   chatHistory.push({ role, text });
   if (chatHistory.length > 20) chatHistory.shift();
 }
+
+// =============================================================================
+// ESCENA 3D
+// =============================================================================
 
 const info = document.getElementById("info");
 
@@ -262,14 +327,28 @@ let blinkTimer = 0;
 let nextBlinkAt = 2 + Math.random() * 3;
 let blinkPhase = 0;
 
+let basePoseRest = null;
+
+function captureRestPose(vrm) {
+  const rest = {};
+  const bones = [
+    "leftUpperArm", "rightUpperArm",
+    "leftLowerArm", "rightLowerArm",
+    "leftHand", "rightHand",
+    "spine", "chest", "neck", "head",
+    "hips", "leftUpperLeg", "rightUpperLeg",
+  ];
+  for (const name of bones) {
+    const node = vrm.humanoid?.getNormalizedBoneNode(name);
+    if (node) rest[name] = node.rotation.clone();
+  }
+  basePoseRest = rest;
+}
+
 function updateLookAtTargetFromPointer(clientX, clientY) {
   const x = (clientX / window.innerWidth) * 2 - 1;
   const y = -(clientY / window.innerHeight) * 2 + 1;
-
-  const headHeight = currentVrm
-    ? controls.target.y
-    : 1.4;
-
+  const headHeight = currentVrm ? controls.target.y : 1.4;
   lookAtTarget.position.set(x * 1.5, headHeight + y * 0.8, 2);
 }
 
@@ -281,8 +360,8 @@ window.addEventListener(
   "touchmove",
   (event) => {
     if (event.touches.length > 0) {
-      const touch = event.touches[0];
-      updateLookAtTargetFromPointer(touch.clientX, touch.clientY);
+      const t = event.touches[0];
+      updateLookAtTargetFromPointer(t.clientX, t.clientY);
     }
   },
   { passive: true },
@@ -310,16 +389,12 @@ loader.load(
 
     const leftUpperArm = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
     const rightUpperArm = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
-    if (leftUpperArm) {
-      leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
-    }
-    if (rightUpperArm) {
-      rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
-    }
+    if (leftUpperArm) leftUpperArm.rotation.z = THREE.MathUtils.degToRad(70);
+    if (rightUpperArm) rightUpperArm.rotation.z = THREE.MathUtils.degToRad(-70);
 
-    if (vrm.lookAt) {
-      vrm.lookAt.target = lookAtTarget;
-    }
+    if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+
+    captureRestPose(vrm);
 
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const center = box.getCenter(new THREE.Vector3());
@@ -332,9 +407,7 @@ loader.load(
     camera.position.set(center.x, headY, center.z + distance);
     controls.update();
 
-    if (info) {
-      info.textContent = "personaje.vrm cargado · mueve el cursor";
-    }
+    if (info) info.textContent = "Hina lista · mueve el cursor";
   },
   (progress) => {
     if (info && progress.total) {
@@ -344,9 +417,7 @@ loader.load(
   },
   (error) => {
     console.error("Error cargando el modelo VRM:", error);
-    if (info) {
-      info.textContent = "Error al cargar personaje.vrm";
-    }
+    if (info) info.textContent = "Error al cargar personaje.vrm";
   },
 );
 
@@ -356,11 +427,163 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// =============================================================================
+// FASE 4 · GESTOS PROCEDIMENTALES (saluda · baila · gira · ven · alegría)
+// =============================================================================
+
+const GESTURES = {
+  saluda: {
+    duration: 3.2,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const wave = Math.sin(t * 8) * 0.35 * k;
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const rh = vrm.humanoid?.getNormalizedBoneNode("rightHand");
+      const rest = basePoseRest || {};
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 1.7 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.3 * k;
+      }
+      if (rl && rest.rightLowerArm) {
+        rl.rotation.x = rest.rightLowerArm.x - 0.6 * k + wave * 0.4;
+      }
+      if (rh && rest.rightHand) {
+        rh.rotation.z = rest.rightHand.z + wave;
+      }
+    },
+  },
+  baila: {
+    duration: 5.5,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const beat = t * 4;
+      const sway = Math.sin(beat) * 0.25 * k;
+      const bob = Math.abs(Math.sin(beat * 2)) * 0.15 * k;
+      const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const la = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const ll = vrm.humanoid?.getNormalizedBoneNode("leftLowerArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const rest = basePoseRest || {};
+      if (hips && rest.hips) {
+        hips.rotation.y = rest.hips.y + sway;
+        hips.rotation.z = rest.hips.z + Math.sin(beat) * 0.08 * k;
+        hips.position.y = bob;
+      }
+      if (spine && rest.spine) {
+        spine.rotation.y = rest.spine.y - sway * 0.5;
+      }
+      if (la && rest.leftUpperArm) {
+        la.rotation.z = rest.leftUpperArm.z + Math.sin(beat) * 0.4 * k;
+        la.rotation.x = rest.leftUpperArm.x - 0.5 * k;
+      }
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z + Math.cos(beat) * 0.4 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.5 * k;
+      }
+      if (ll && rest.leftLowerArm) {
+        ll.rotation.x = rest.leftLowerArm.x - Math.abs(Math.sin(beat)) * 0.6 * k;
+      }
+      if (rl && rest.rightLowerArm) {
+        rl.rotation.x = rest.rightLowerArm.x - Math.abs(Math.cos(beat)) * 0.6 * k;
+      }
+    },
+  },
+  gira: {
+    duration: 3.0,
+    apply(vrm, t, total) {
+      const turn = (t / total) * Math.PI * 2;
+      const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+      const rest = basePoseRest || {};
+      if (hips && rest.hips) {
+        hips.rotation.y = rest.hips.y + turn;
+      }
+    },
+  },
+  ven: {
+    duration: 2.8,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const wave = Math.sin(t * 4);
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const rl = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const rest = basePoseRest || {};
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 1.0 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.6 * k;
+      }
+      if (rl && rest.rightLowerArm) {
+        rl.rotation.x = rest.rightLowerArm.x - 1.2 * k + wave * 0.4 * k;
+      }
+      if (spine && rest.spine) {
+        spine.rotation.x = rest.spine.x + 0.2 * k;
+      }
+    },
+  },
+  alegria: {
+    duration: 2.4,
+    apply(vrm, t, total) {
+      const k = Math.sin((t / total) * Math.PI);
+      const bob = Math.abs(Math.sin(t * 6)) * 0.1 * k;
+      const la = vrm.humanoid?.getNormalizedBoneNode("leftUpperArm");
+      const ra = vrm.humanoid?.getNormalizedBoneNode("rightUpperArm");
+      const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+      const spine = vrm.humanoid?.getNormalizedBoneNode("spine");
+      const rest = basePoseRest || {};
+      if (la && rest.leftUpperArm) {
+        la.rotation.z = rest.leftUpperArm.z + 1.6 * k;
+        la.rotation.x = rest.leftUpperArm.x - 0.6 * k;
+      }
+      if (ra && rest.rightUpperArm) {
+        ra.rotation.z = rest.rightUpperArm.z - 1.6 * k;
+        ra.rotation.x = rest.rightUpperArm.x - 0.6 * k;
+      }
+      if (hips && rest.hips) hips.position.y = bob;
+      if (spine && rest.spine) {
+        spine.rotation.x = rest.spine.x - 0.15 * k;
+      }
+    },
+  },
+};
+
+let activeGesture = null;
+let gestureStartedAt = 0;
+
+function playGesture(name) {
+  if (!GESTURES[name]) return;
+  if (!currentVrm) return;
+  activeGesture = name;
+  gestureStartedAt = performance.now();
+  console.log(`[gesture] play "${name}"`);
+}
+
+function tickGesture() {
+  if (!activeGesture || !currentVrm) return;
+  const def = GESTURES[activeGesture];
+  if (!def) {
+    activeGesture = null;
+    return;
+  }
+  const t = (performance.now() - gestureStartedAt) / 1000;
+  if (t >= def.duration) {
+    activeGesture = null;
+    return;
+  }
+  def.apply(currentVrm, t, def.duration);
+}
+
+// =============================================================================
+// CHAT UI
+// =============================================================================
+
 const chatLog = document.getElementById("chat-log");
 const chatBar = document.getElementById("chat-bar");
 const chatInput = document.getElementById("chat-input");
 
-function appendMessage(text, sender) {
+function appendMessage(text, sender, opts = {}) {
   if (!chatLog) return null;
   const msg = document.createElement("div");
   msg.className = `chat-message ${sender}`;
@@ -384,8 +607,27 @@ function appendMessage(text, sender) {
       if (current) speakResponse(current);
     });
     msg.appendChild(playBtn);
+  } else if (sender === "system") {
+    msg.textContent = text;
   } else {
     msg.textContent = text;
+    if (Array.isArray(opts.attachments) && opts.attachments.length) {
+      const att = document.createElement("div");
+      att.className = "chat-attachment";
+      for (const a of opts.attachments) {
+        const line = document.createElement("div");
+        line.textContent = `📎 ${a.name} · ${formatBytes(a.size)}`;
+        att.appendChild(line);
+        if (a.previewUrl) {
+          const img = document.createElement("img");
+          img.src = a.previewUrl;
+          img.className = "att-thumb";
+          img.alt = a.name;
+          att.appendChild(img);
+        }
+      }
+      msg.appendChild(att);
+    }
   }
 
   chatLog.appendChild(msg);
@@ -396,12 +638,20 @@ function appendMessage(text, sender) {
 function setBubbleText(bubble, text) {
   if (!bubble) return;
   const textEl = bubble.querySelector(".bubble-text");
-  if (textEl) {
-    textEl.textContent = text;
-  } else {
-    bubble.textContent = text;
-  }
+  if (textEl) textEl.textContent = text;
+  else bubble.textContent = text;
 }
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return "?";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// =============================================================================
+// LIP-SYNC + TTS (idéntico a antes, con ligeros ajustes)
+// =============================================================================
 
 let happyTimeoutId = null;
 let lipSyncRafId = null;
@@ -428,12 +678,6 @@ function fallbackLipSync(text) {
   const length = (text && text.length) || 20;
   const durationMs = Math.max(1500, Math.min(12000, length * 70));
   const startedAt = performance.now();
-
-  console.log(
-    "[speech] fallback lip-sync activado (",
-    durationMs,
-    "ms, 75ms tick)",
-  );
 
   fallbackLipSyncIntervalId = setInterval(() => {
     if (!currentVrm || !currentVrm.expressionManager) return;
@@ -517,21 +761,8 @@ function pickSpanishFemaleVoice() {
   if (esVoices.length === 0) return null;
 
   const femaleHints = [
-    "female",
-    "mujer",
-    "mónica",
-    "monica",
-    "paulina",
-    "marisol",
-    "esperanza",
-    "sabina",
-    "helena",
-    "lucia",
-    "lucía",
-    "sara",
-    "laura",
-    "carmen",
-    "elvira",
+    "female", "mujer", "mónica", "monica", "paulina", "marisol", "esperanza",
+    "sabina", "helena", "lucia", "lucía", "sara", "laura", "carmen", "elvira",
     "google español",
   ];
   const maleHints = ["male", "masculino", "jorge", "diego", "carlos", "juan"];
@@ -557,23 +788,16 @@ function primeSpeech() {
     u.volume = 0;
     u.rate = 1;
     speechSynthesis.speak(u);
-    console.log("[speech] audio desbloqueado");
   } catch (err) {
-    console.warn("[speech] no se pudo desbloquear el audio:", err);
+    console.warn("[speech] no se pudo desbloquear:", err);
   }
   speechPrimed = true;
 }
 
 function doSpeak(text) {
   const voices = speechSynthesis.getVoices() || [];
-  console.log("Voces disponibles:", voices.length);
   cachedVoices = voices;
-
   const voice = pickSpanishFemaleVoice();
-  console.log(
-    "[speech] voz elegida:",
-    voice ? `${voice.name} (${voice.lang})` : "ninguna (default del navegador)",
-  );
 
   const utter = new SpeechSynthesisUtterance(text);
   if (voice) utter.voice = voice;
@@ -581,16 +805,10 @@ function doSpeak(text) {
   utter.rate = 1.0;
   utter.pitch = 1.1;
 
-  utter.onstart = () => {
-    console.log("[speech] onstart — arrancando lip-sync");
-    simulateLipSync();
-  };
-  utter.onend = () => {
-    console.log("[speech] onend");
-    stopLipSync();
-  };
+  utter.onstart = () => simulateLipSync();
+  utter.onend = () => stopLipSync();
   utter.onerror = (event) => {
-    console.warn("[speech] onerror:", event.error, "→ usando lip-sync de respaldo");
+    console.warn("[speech] onerror:", event.error);
     stopLipSync();
     fallbackLipSync(text);
   };
@@ -599,10 +817,7 @@ function doSpeak(text) {
 }
 
 function speakResponse(text) {
-  console.log("--- Intentando hablar ---", text?.slice(0, 60));
-
   if (typeof speechSynthesis === "undefined") {
-    console.warn("[speech] Web Speech API no disponible en este navegador");
     fallbackLipSync(text);
     return;
   }
@@ -612,7 +827,7 @@ function speakResponse(text) {
     speechSynthesis.resume();
     speechSynthesis.cancel();
   } catch (err) {
-    console.warn("[speech] force-reset falló:", err);
+    /* ignore */
   }
   stopLipSync();
 
@@ -620,10 +835,6 @@ function speakResponse(text) {
 
   const voices = speechSynthesis.getVoices() || [];
   if (voices.length === 0) {
-    console.log(
-      "[speech] lista de voces vacía, esperando 'voiceschanged'…",
-    );
-
     let fired = false;
     const onVoices = () => {
       if (fired) return;
@@ -632,14 +843,10 @@ function speakResponse(text) {
       doSpeak(text);
     };
     speechSynthesis.addEventListener?.("voiceschanged", onVoices);
-
     window.setTimeout(() => {
       if (fired) return;
       fired = true;
       speechSynthesis.removeEventListener?.("voiceschanged", onVoices);
-      console.warn(
-        "[speech] 'voiceschanged' no llegó tras 1.5s, hablo igualmente",
-      );
       doSpeak(text);
     }, 1500);
     return;
@@ -651,9 +858,7 @@ function speakResponse(text) {
 function reactHappy(durationMs = 2000) {
   if (!currentVrm || !currentVrm.expressionManager) return;
   currentVrm.expressionManager.setValue("happy", 1);
-  if (happyTimeoutId !== null) {
-    clearTimeout(happyTimeoutId);
-  }
+  if (happyTimeoutId !== null) clearTimeout(happyTimeoutId);
   happyTimeoutId = window.setTimeout(() => {
     if (currentVrm && currentVrm.expressionManager) {
       currentVrm.expressionManager.setValue("happy", 0);
@@ -662,20 +867,237 @@ function reactHappy(durationMs = 2000) {
   }, durationMs);
 }
 
-async function postChatOnce(payload) {
-  const requestBody = JSON.stringify(payload);
-  console.log("Petición al servidor:", {
-    url: CHAT_ENDPOINT,
-    affectionScore: payload.affectionScore,
-    level: affectionLevel(payload.affectionScore),
-    historyLen: payload.history?.length || 0,
-    summaries: payload.memory?.summaries?.length || 0,
-  });
+// =============================================================================
+// FASE 4 · COMANDOS DE ACCIÓN Y REGALOS
+// =============================================================================
 
+const ACTION_TRIGGERS = {
+  saluda: ["saluda", "salúdame", "saludame", "/saluda", "saludo"],
+  baila: ["baila", "danza", "/baila", "bailame"],
+  gira: ["gira", "/gira", "da una vuelta", "vuélta", "vuelta"],
+  ven: ["ven", "/ven", "ven aquí", "ven aqui", "acércate", "acercate"],
+};
+
+const FOOD_GIFT_WORDS = [
+  "pizza", "hamburguesa", "sushi", "ramen", "fideos", "pollo", "ceviche",
+  "anticucho", "arroz", "papa", "papas", "chocolate", "chocolates",
+  "dulce", "dulces", "caramelo", "caramelos", "torta", "pastel", "pasteles",
+  "galleta", "galletas", "donut", "donuts", "donas", "helado", "helados",
+  "cupcake", "cupcakes", "café", "cafe", "té", "te verde", "manzana",
+  "fresa", "fresas", "fruta", "frutas", "comida", "almuerzo", "cena",
+  "desayuno", "panqueque", "panqueques", "macarons", "bombón", "bombones",
+  "queque", "alfajor", "alfajores", "picarones", "suspiro",
+];
+
+function detectActionCommand(textLower) {
+  for (const [name, triggers] of Object.entries(ACTION_TRIGGERS)) {
+    for (const t of triggers) {
+      const re = new RegExp(`(^|\\s|\\W)${t.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}(\\W|$)`, "i");
+      if (re.test(textLower)) return name;
+    }
+  }
+  return null;
+}
+
+function detectGiftCommand(text) {
+  const t = text.trim();
+  const m = /^\/regalar\b\s*(.*)$/i.exec(t);
+  if (!m) return null;
+  const item = m[1].trim();
+  const lower = item.toLowerCase();
+  const isFood = FOOD_GIFT_WORDS.some((w) =>
+    new RegExp(`(^|\\W)${w}(\\W|$)`, "i").test(lower),
+  );
+  return { item: item || "algo", isFood };
+}
+
+// =============================================================================
+// FASE 3 · ADJUNTOS (cámara, archivos, audio)
+// =============================================================================
+
+const cameraInput = document.getElementById("camera-input");
+const fileInput = document.getElementById("file-input");
+const cameraBtn = document.getElementById("camera-btn");
+const fileBtn = document.getElementById("file-btn");
+const micBtn = document.getElementById("mic-btn");
+const attachmentPreview = document.getElementById("attachment-preview");
+
+const MAX_TOTAL_BYTES = 25 * 1024 * 1024; // 25 MB total per envío
+const pendingAttachments = []; // { name, mime, size, base64, previewUrl? }
+
+function renderAttachmentChips() {
+  if (!attachmentPreview) return;
+  attachmentPreview.innerHTML = "";
+  if (pendingAttachments.length === 0) {
+    attachmentPreview.classList.remove("visible");
+    return;
+  }
+  attachmentPreview.classList.add("visible");
+  pendingAttachments.forEach((att, idx) => {
+    const chip = document.createElement("div");
+    chip.className = "attachment-chip";
+    const name = document.createElement("span");
+    name.className = "att-name";
+    name.textContent = `${att.name} · ${formatBytes(att.size)}`;
+    chip.appendChild(name);
+    const x = document.createElement("button");
+    x.type = "button";
+    x.setAttribute("aria-label", "Quitar adjunto");
+    x.textContent = "×";
+    x.addEventListener("click", () => {
+      pendingAttachments.splice(idx, 1);
+      renderAttachmentChips();
+    });
+    chip.appendChild(x);
+    attachmentPreview.appendChild(chip);
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const i = result.indexOf(",");
+      resolve(i >= 0 ? result.slice(i + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function totalAttachedBytes() {
+  return pendingAttachments.reduce((acc, a) => acc + (a.size || 0), 0);
+}
+
+async function addFilesToAttachments(filesList) {
+  for (const file of filesList) {
+    if (!file) continue;
+    if (totalAttachedBytes() + file.size > MAX_TOTAL_BYTES) {
+      appendMessage(
+        `No puedo adjuntar "${file.name}" (excede 25 MB en total).`,
+        "system",
+      );
+      continue;
+    }
+    try {
+      const base64 = await fileToBase64(file);
+      const att = {
+        name: file.name || "archivo",
+        mime: file.type || "application/octet-stream",
+        size: file.size || 0,
+        base64,
+      };
+      if (att.mime.startsWith("image/")) {
+        att.previewUrl = `data:${att.mime};base64,${base64}`;
+      }
+      pendingAttachments.push(att);
+    } catch (err) {
+      console.warn("[attach] no pude leer:", file.name, err);
+      appendMessage(`No pude leer "${file.name}".`, "system");
+    }
+  }
+  renderAttachmentChips();
+}
+
+if (cameraBtn && cameraInput) {
+  cameraBtn.addEventListener("click", () => {
+    cameraInput.value = "";
+    cameraInput.click();
+  });
+  cameraInput.addEventListener("change", async (event) => {
+    const files = event.target.files;
+    if (!files || !files.length) return;
+    await addFilesToAttachments(files);
+  });
+}
+
+if (fileBtn && fileInput) {
+  fileBtn.addEventListener("click", () => {
+    fileInput.value = "";
+    fileInput.click();
+  });
+  fileInput.addEventListener("change", async (event) => {
+    const files = event.target.files;
+    if (!files || !files.length) return;
+    await addFilesToAttachments(files);
+  });
+}
+
+// Audio recording (mic button)
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordingStream = null;
+
+async function startRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    appendMessage("Tu navegador no permite grabar audio.", "system");
+    return;
+  }
+  try {
+    recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    console.warn("[mic] permiso denegado:", err);
+    appendMessage("No me diste permiso para usar el micrófono.", "system");
+    return;
+  }
+  recordedChunks = [];
+  let mime = "audio/webm";
+  if (window.MediaRecorder?.isTypeSupported?.("audio/webm;codecs=opus")) {
+    mime = "audio/webm;codecs=opus";
+  } else if (window.MediaRecorder?.isTypeSupported?.("audio/mp4")) {
+    mime = "audio/mp4";
+  }
+  try {
+    mediaRecorder = new MediaRecorder(recordingStream, { mimeType: mime });
+  } catch (err) {
+    console.warn("[mic] mime no soportado, fallback default:", err);
+    mediaRecorder = new MediaRecorder(recordingStream);
+  }
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+  };
+  mediaRecorder.onstop = async () => {
+    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+    recordedChunks = [];
+    if (recordingStream) {
+      recordingStream.getTracks().forEach((t) => t.stop());
+      recordingStream = null;
+    }
+    const ext = blob.type.includes("mp4") ? "m4a" : "webm";
+    const file = new File([blob], `nota-voz.${ext}`, { type: blob.type });
+    await addFilesToAttachments([file]);
+  };
+  mediaRecorder.start();
+  micBtn?.classList.add("recording");
+  micBtn?.setAttribute("aria-label", "Detener grabación");
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  }
+  micBtn?.classList.remove("recording");
+  micBtn?.setAttribute("aria-label", "Grabar audio");
+}
+
+if (micBtn) {
+  micBtn.addEventListener("click", () => {
+    if (mediaRecorder && mediaRecorder.state === "recording") stopRecording();
+    else startRecording();
+  });
+}
+
+// =============================================================================
+// LLAMADAS A LA API
+// =============================================================================
+
+async function postChatOnce(payload) {
   const response = await fetch(CHAT_ENDPOINT, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: requestBody,
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
   });
 
   const rawText = await response.text();
@@ -683,33 +1105,23 @@ async function postChatOnce(payload) {
   try {
     data = rawText ? JSON.parse(rawText) : null;
   } catch (parseErr) {
-    console.error(
-      "Respuesta del servidor (no es JSON):",
-      response.status,
-      rawText,
-    );
-    throw new Error(
-      `Respuesta no-JSON del servidor (HTTP ${response.status})`,
-    );
+    console.error("[chat] respuesta no-JSON:", response.status, rawText);
+    throw new Error(`Respuesta no-JSON (HTTP ${response.status})`);
   }
 
-  console.log("Respuesta del servidor:", data);
-
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("no autorizado");
+  }
   if (!response.ok) {
     const detail = data?.error ? ` - ${data.error}` : "";
-    console.error(
-      `Error del servidor: HTTP ${response.status}${detail}`,
-      data,
-    );
     const err = new Error(`HTTP ${response.status}${detail}`);
     err.status = response.status;
     throw err;
   }
 
   const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
-  if (!reply) {
-    throw new Error("El servidor respondió 200 pero sin campo 'reply'");
-  }
+  if (!reply) throw new Error("Respuesta sin 'reply'");
   return reply;
 }
 
@@ -720,14 +1132,10 @@ async function askGemini(userText) {
     history: chatHistory.slice(-HISTORY_WINDOW),
     memory: distilledMemoryForServer(),
   };
-
   try {
     return await postChatOnce(payload);
   } catch (err) {
     if (err?.status === 429) {
-      console.warn(
-        "[chat] 429 recibido — esperando 2s y reintentando una vez...",
-      );
       await new Promise((r) => setTimeout(r, 2000));
       return await postChatOnce(payload);
     }
@@ -735,34 +1143,59 @@ async function askGemini(userText) {
   }
 }
 
+async function analyzeWithFiles(userText, attachments) {
+  const payload = {
+    message: userText,
+    affectionScore,
+    memory: distilledMemoryForServer(),
+    files: attachments.map((a) => ({
+      name: a.name,
+      mime: a.mime,
+      data: a.base64,
+    })),
+  };
+  const response = await fetch(ANALYZE_ENDPOINT, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => null);
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("no autorizado");
+  }
+  if (!response.ok) {
+    const detail = data?.error ? ` - ${data.error}` : "";
+    const err = new Error(`HTTP ${response.status}${detail}`);
+    err.status = response.status;
+    throw err;
+  }
+  const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
+  if (!reply) throw new Error("Respuesta sin 'reply'");
+  return reply;
+}
+
 async function requestSummary() {
   const recent = chatHistory.slice(-6);
   if (recent.length < 2) return;
-
-  console.log(
-    `[memory] generando resumen tras ${memory.totalUserMessages} mensajes…`,
-  );
-
   try {
-    const response = await fetch("/summarize", {
+    const response = await fetch(SUMMARIZE_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         history: recent,
-        userName: memory.profile.name,
+        userName: memory.profile?.name || "el usuario",
       }),
     });
-    if (!response.ok) {
-      console.warn("[memory] resumen falló: HTTP", response.status);
+    if (response.status === 401) {
+      handleUnauthorized();
       return;
     }
+    if (!response.ok) return;
     const data = await response.json().catch(() => null);
     const summary =
       typeof data?.summary === "string" ? data.summary.trim() : "";
-    if (!summary) {
-      console.warn("[memory] resumen vacío");
-      return;
-    }
+    if (!summary) return;
     memory.summaries.push(summary);
     if (memory.summaries.length > MEMORY_MAX_SUMMARIES) {
       memory.summaries = memory.summaries.slice(-MEMORY_MAX_SUMMARIES);
@@ -774,34 +1207,93 @@ async function requestSummary() {
   }
 }
 
+// =============================================================================
+// FLUJO PRINCIPAL DE MENSAJES
+// =============================================================================
+
 async function handleUserMessage(text) {
   const trimmed = text.trim();
-  if (!trimmed) return;
+  if (!trimmed && pendingAttachments.length === 0) return;
+  if (!authToken) {
+    showLockOverlay("Necesitas escribir la frase clave para hablar con Hina.");
+    return;
+  }
 
   primeSpeech();
-  if (typeof speechSynthesis !== "undefined") {
-    speechSynthesis.cancel();
-  }
+  if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
   stopLipSync();
 
-  updateAffection(trimmed);
+  const attachments = pendingAttachments.splice(0, pendingAttachments.length);
+  renderAttachmentChips();
 
-  appendMessage(trimmed, "user");
+  registerInteraction(trimmed);
+
+  const visibleAttachments = attachments.map((a) => ({
+    name: a.name,
+    size: a.size,
+    previewUrl: a.previewUrl,
+  }));
+
+  appendMessage(trimmed || "(sin texto)", "user", {
+    attachments: visibleAttachments,
+  });
   chatInput.value = "";
-  pushHistory("user", trimmed);
+  pushHistory(
+    "user",
+    attachments.length
+      ? `${trimmed || "(sin texto)"} [adjuntos: ${attachments.map((a) => a.name).join(", ")}]`
+      : trimmed,
+  );
 
   memory.totalUserMessages = (memory.totalUserMessages || 0) + 1;
   persistMemory();
 
-  const thinkingBubble = appendMessage("Hina está pensando...", "bot");
+  // FASE 4 · /regalar
+  const gift = detectGiftCommand(trimmed);
+  if (gift && attachments.length === 0) {
+    if (gift.isFood) {
+      bumpAffection(AFFECT_GIFT_DELTA, `regalo: ${gift.item}`);
+      playGesture("alegria");
+      reactHappy(2400);
+      const reply = `¡${gift.item}! Mmm, gracias… eso me alegra muchísimo.`;
+      appendMessage(reply, "bot");
+      pushHistory("model", reply);
+      speakResponse(reply);
+    } else {
+      const reply = `Mm, ¿"${gift.item}"? Lo aprecio, pero hoy me apetece algo dulce o de comer.`;
+      appendMessage(reply, "bot");
+      pushHistory("model", reply);
+      speakResponse(reply);
+    }
+    return;
+  }
+
+  // FASE 4 · acciones
+  const action = detectActionCommand(trimmed.toLowerCase());
+  if (action && attachments.length === 0) {
+    playGesture(action);
+    const responses = {
+      saluda: ["Hola.", "Te saludo.", "Hey, hola."],
+      baila: ["¡A bailar!", "Mira mis pasos.", "¿Qué tal este ritmo?"],
+      gira: ["Una vuelta.", "Mírame.", "Lista."],
+      ven: ["Voy.", "Aquí estoy.", "Acércate tú también."],
+    };
+    const list = responses[action] || ["Hecho."];
+    const reply = list[Math.floor(Math.random() * list.length)];
+    appendMessage(reply, "bot");
+    pushHistory("model", reply);
+    speakResponse(reply);
+    return;
+  }
+
+  const thinkingBubble = appendMessage("Hina está pensando…", "bot");
 
   try {
-    const reply = await askGemini(trimmed);
-    if (thinkingBubble) {
-      setBubbleText(thinkingBubble, reply);
-    } else {
-      appendMessage(reply, "bot");
-    }
+    const reply = attachments.length
+      ? await analyzeWithFiles(trimmed, attachments)
+      : await askGemini(trimmed);
+    if (thinkingBubble) setBubbleText(thinkingBubble, reply);
+    else appendMessage(reply, "bot");
     pushHistory("model", reply);
     reactHappy(3000);
     speakResponse(reply);
@@ -811,47 +1303,43 @@ async function handleUserMessage(text) {
     }
   } catch (error) {
     console.error("Error consultando a Gemini:", error);
-
     let errorText;
     if (error?.status === 429) {
-      errorText =
-        "¡Cálmate, Víctor! Me aturdes con tantos mensajes, dame un respiro.";
+      errorText = "Demasiados mensajes seguidos, dame un respiro un momento.";
+    } else if (error?.message === "no autorizado") {
+      errorText = "Sesión expirada. Vuelve a escribir la frase clave.";
     } else {
       const detail = error?.message ? ` (${error.message})` : "";
       errorText = `Hina tuvo un pequeño problema de conexión${detail}`;
     }
-
-    if (thinkingBubble) {
-      setBubbleText(thinkingBubble, errorText);
-    } else {
-      appendMessage(errorText, "bot");
-    }
+    if (thinkingBubble) setBubbleText(thinkingBubble, errorText);
+    else appendMessage(errorText, "bot");
   }
 }
 
 function showInitialGreeting() {
   if (!chatLog) return;
-  const name = memory.profile.name;
-  const city = memory.profile.city;
   const lvl = affectionLevel(affectionScore);
-
   let greeting;
-  if (lvl === "low") {
-    greeting = `Tch, ya regresaste, ${name}. ¿Hoy sí piensas estudiar en SENATI o solo vienes a perder el tiempo?`;
-  } else if (lvl === "mid") {
-    greeting = `Hola, ${name}… no te emociones. Solo me alegra un poco verte de vuelta.`;
+  if (!memory.profile?.name) {
+    greeting =
+      "Hola. No sé quién eres todavía. Si quieres, dime tu nombre.";
+  } else if (lvl === "distant") {
+    greeting = `Hola, ${memory.profile.name}. Sigo sin conocerte bien, así que iré con calma.`;
+  } else if (lvl === "confidant") {
+    greeting = `Hola, ${memory.profile.name}. Me alegra verte por aquí.`;
+  } else if (lvl === "affectionate") {
+    greeting = `Hola, ${memory.profile.name}. ¿Cómo va tu día? Me preocupo por ti.`;
   } else {
-    greeting = `¡${name}! Te estaba esperando. ¿Cómo va todo por ${city}? Cuéntame qué proyecto de Python traes hoy.`;
+    greeting = `¡${memory.profile.name}! Te estaba esperando.`;
   }
-
-  if (memory.summaries.length > 0) {
-    const lastSummary = memory.summaries[memory.summaries.length - 1];
-    console.log(`[memory] último hito recordado: "${lastSummary}"`);
-  }
-
   appendMessage(greeting, "bot");
   pushHistory("model", greeting);
 }
+
+// =============================================================================
+// EVENTOS UI
+// =============================================================================
 
 if (chatBar) {
   chatBar.addEventListener("submit", (event) => {
@@ -897,11 +1385,99 @@ if (startOverlay) {
   );
 }
 
-const unlockOnFirstTouch = () => {
-  primeSpeech();
-};
+const unlockOnFirstTouch = () => primeSpeech();
 window.addEventListener("pointerdown", unlockOnFirstTouch, { once: true });
 window.addEventListener("keydown", unlockOnFirstTouch, { once: true });
+
+// =============================================================================
+// LOCK OVERLAY (frase clave)
+// =============================================================================
+
+const lockOverlay = document.getElementById("lock-overlay");
+const lockForm = document.getElementById("lock-form");
+const lockInput = document.getElementById("lock-input");
+const lockBtn = document.getElementById("lock-btn");
+const lockError = document.getElementById("lock-error");
+
+function showLockOverlay(message = "") {
+  if (!lockOverlay) return;
+  lockOverlay.classList.remove("hidden");
+  if (lockError) lockError.textContent = message || "";
+  if (lockInput) {
+    lockInput.value = "";
+    setTimeout(() => lockInput.focus(), 50);
+  }
+}
+
+function hideLockOverlay() {
+  if (lockOverlay) lockOverlay.classList.add("hidden");
+}
+
+function handleUnauthorized() {
+  authToken = null;
+  persistAuth(null);
+  showLockOverlay("Sesión expirada. Vuelve a escribir la frase clave.");
+}
+
+async function attemptUnlock(passphrase) {
+  if (!passphrase) {
+    if (lockError) lockError.textContent = "Escribe la frase clave.";
+    return;
+  }
+  lockBtn.disabled = true;
+  if (lockError) lockError.textContent = "";
+  try {
+    const token = await verifyPassphrase(passphrase);
+    authToken = token;
+    persistAuth(token);
+    hideLockOverlay();
+    if (info) info.textContent = "Hina lista";
+    if (chatLog && chatLog.children.length === 0) showInitialGreeting();
+  } catch (err) {
+    console.warn("[auth] fallo:", err);
+    if (lockError) {
+      lockError.textContent = err?.message || "Acceso denegado.";
+    }
+    authToken = null;
+    persistAuth(null);
+  } finally {
+    lockBtn.disabled = false;
+  }
+}
+
+if (lockForm) {
+  lockForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    attemptUnlock(lockInput?.value || "");
+  });
+}
+
+async function bootstrapAuth() {
+  loadStoredAuth();
+  if (!authToken) {
+    showLockOverlay();
+    return;
+  }
+  // Validate stored token
+  try {
+    const ok = await verifyPassphrase(authToken);
+    authToken = ok;
+    persistAuth(ok);
+    hideLockOverlay();
+    if (chatLog && chatLog.children.length === 0) showInitialGreeting();
+  } catch (err) {
+    console.warn("[auth] token guardado inválido:", err);
+    authToken = null;
+    persistAuth(null);
+    showLockOverlay();
+  }
+}
+
+bootstrapAuth();
+
+// =============================================================================
+// LOOP DE RENDERIZADO (idle: respiración + parpadeo + gestos)
+// =============================================================================
 
 function animate() {
   requestAnimationFrame(animate);
@@ -911,7 +1487,8 @@ function animate() {
 
   if (currentVrm) {
     const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
-    if (spine) {
+    if (spine && !activeGesture) {
+      // respiración idle (solo si no estamos en un gesto activo)
       spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
     }
 
@@ -942,6 +1519,8 @@ function animate() {
       expressionManager.setValue("blink", blinkValue);
     }
 
+    tickGesture();
+
     currentVrm.update(delta);
   }
 
@@ -950,4 +1529,3 @@ function animate() {
 }
 
 animate();
-showInitialGreeting();
