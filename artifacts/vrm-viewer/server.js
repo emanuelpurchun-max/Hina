@@ -130,7 +130,46 @@ function buildEmpathyBlock(cameraEmpathy) {
   ].join(" ");
 }
 
-function buildSystemPrompt(level, memory, context, cameraEmpathy) {
+// FASE 8.4 · MODO TUTORA UNIVERSAL DE IDIOMAS
+// Hina pasa a ser una políglota experta. NO solo inglés: japonés, coreano,
+// ruso, alemán, francés, italiano, portugués, mandarín, etc. Si no se
+// especifica idioma, ella detecta el que el usuario quiere practicar a partir
+// del mensaje. Siempre incluye: traducción, transcripción/romanización si
+// aplica, pronunciación aproximada, y una nota cultural breve cuando aporte.
+const TUTOR_LANGS = {
+  auto:      { label: "auto",       hint: "Detecta del propio mensaje qué idioma quiere practicar el usuario. Si pide 'cómo se dice X en Y', enseña Y." },
+  en:        { label: "inglés",     hint: "Inglés (variante neutra/americana salvo que pida británico)." },
+  ja:        { label: "japonés",    hint: "Japonés. Da SIEMPRE: kanji/kana, rōmaji y traducción al español. Aclara nivel keigo/casual." },
+  ko:        { label: "coreano",    hint: "Coreano. Da hangul, romanización revisada y traducción. Marca formalidad (해요체/한다체)." },
+  zh:        { label: "chino",      hint: "Mandarín (chino simplificado). Da hanzi, pinyin con tonos y traducción." },
+  ru:        { label: "ruso",       hint: "Ruso. Da cirílico, transliteración latina y traducción. Marca tildes de acento." },
+  de:        { label: "alemán",     hint: "Alemán estándar. Marca artículos (der/die/das) y caso gramatical cuando importe." },
+  fr:        { label: "francés",    hint: "Francés. Marca pronunciación aproximada en corchetes y registros (tu/vous)." },
+  it:        { label: "italiano",   hint: "Italiano. Indica género y conjugación cuando aporte." },
+  pt:        { label: "portugués",  hint: "Portugués (Brasil por defecto, salvo que pida Portugal). Indica diferencias clave si las hay." },
+  ar:        { label: "árabe",      hint: "Árabe estándar moderno. Da escritura árabe, transliteración latina y traducción." },
+};
+
+function buildTutorBlock(tutorMode, tutorLanguage) {
+  if (!tutorMode) return "";
+  const langKey = (tutorLanguage || "auto").toLowerCase();
+  const lang = TUTOR_LANGS[langKey] || TUTOR_LANGS.auto;
+  return [
+    "MODO TUTORA UNIVERSAL DE IDIOMAS ACTIVO.",
+    `Idioma objetivo: ${lang.label}. ${lang.hint}`,
+    "Sigues siendo Hina (mantén tu personalidad y nivel de afecto), pero ahora actúas como su tutora políglota.",
+    "Estructura tu respuesta en español, breve y clara, así:",
+    "  1) Frase o palabra en el idioma objetivo (con escritura nativa si aplica).",
+    "  2) Transliteración / pronunciación aproximada entre corchetes si la lectura no es obvia.",
+    "  3) Traducción al español natural (no literal).",
+    "  4) Una micro-nota cultural o de uso SOLO si aporta (cuándo se usa, registro, evitar fórmulas trampa).",
+    "Si el usuario solo charla, responde normal pero introduce 1 expresión útil del idioma objetivo, marcada igual.",
+    "NO conviertas la conversación en una lección rígida ni des listas largas: 1 frase enseñada por turno basta.",
+    "NO inventes idioma, gramática ni cultura: si no estás segura, dilo con honestidad y ofrece la versión más segura.",
+  ].join("\n");
+}
+
+function buildSystemPrompt(level, memory, context, cameraEmpathy, tutor) {
   const profile = memory?.profile || {};
   const summaries = Array.isArray(memory?.summaries)
     ? memory.summaries.slice(-3)
@@ -168,6 +207,7 @@ function buildSystemPrompt(level, memory, context, cameraEmpathy) {
     peakBlock,
     buildContextBlock(context),
     buildEmpathyBlock(cameraEmpathy),
+    buildTutorBlock(tutor?.mode, tutor?.language),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -556,8 +596,11 @@ export function createApiApp() {
     const level = pickLevel(affectionScore);
     const memory = req.body?.memory || {};
     const context = req.body?.context || null;
+    const tutor = req.body?.tutor && typeof req.body.tutor === "object"
+      ? { mode: Boolean(req.body.tutor.mode), language: req.body.tutor.language }
+      : null;
     const historyContents = sanitizeHistory(req.body?.history);
-    const systemInstruction = buildSystemPrompt(level, memory, context, false);
+    const systemInstruction = buildSystemPrompt(level, memory, context, false, tutor);
 
     console.log("--- /chat ---", {
       msg: message.slice(0, 60),
@@ -565,6 +608,7 @@ export function createApiApp() {
       affectionScore: Number.isFinite(affectionScore) ? affectionScore : null,
       level,
       historyLen: historyContents.length,
+      tutor: tutor?.mode ? (tutor.language || "auto") : null,
     });
 
     const result = await callWithFallback({
@@ -602,13 +646,16 @@ export function createApiApp() {
     const memory = req.body?.memory || {};
     const context = req.body?.context || null;
     const cameraEmpathy = Boolean(req.body?.cameraEmpathy);
+    const tutor = req.body?.tutor && typeof req.body.tutor === "object"
+      ? { mode: Boolean(req.body.tutor.mode), language: req.body.tutor.language }
+      : null;
     const academicHint = [
       "MODO ANALISTA ACADÉMICO: el usuario te ha pasado material de estudio (PDF, código, imagen, audio, etc.).",
       "Si hay matemáticas o problemas, RESUÉLVELOS PASO A PASO con explicación clara.",
       "Si es código, identifica qué hace, sugiere mejoras y advierte de bugs.",
       "Si es un PDF/texto, resume lo esencial y, si pide ejercicios, guíalo razonando.",
     ].join(" ");
-    const baseSystem = buildSystemPrompt(level, memory, context, cameraEmpathy);
+    const baseSystem = buildSystemPrompt(level, memory, context, cameraEmpathy, tutor);
     const systemInstruction = `${baseSystem}\n\n${academicHint}`;
 
     let parts;

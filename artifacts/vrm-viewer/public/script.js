@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 
 // =============================================================================
@@ -77,6 +78,66 @@ function notifyBrainSwitchedByFallback(requested, actual) {
   refreshBrainToggleUi();
 }
 const SUMMARIZE_ENDPOINT = "/summarize";
+
+// =============================================================================
+// FASE 8.4 · MODO TUTORA UNIVERSAL DE IDIOMAS (estado en cliente)
+// =============================================================================
+// Se persiste en localStorage. Se manda al servidor en cada /chat y /analyze.
+// Si está en "off", no se cambia nada del prompt.
+const TUTOR_STORAGE_KEY = "hina.tutor.v1";
+const TUTOR_CYCLE = ["off", "auto", "ja", "ko", "en", "zh", "ru", "de", "fr", "it", "pt", "ar"];
+const TUTOR_LABELS = {
+  off:  "OFF",
+  auto: "Auto",
+  ja:   "日本語",
+  ko:   "한국어",
+  en:   "English",
+  zh:   "中文",
+  ru:   "Русский",
+  de:   "Deutsch",
+  fr:   "Français",
+  it:   "Italiano",
+  pt:   "Português",
+  ar:   "العربية",
+};
+let tutorLanguage = "off";
+function loadStoredTutor() {
+  try {
+    const v = localStorage.getItem(TUTOR_STORAGE_KEY);
+    if (TUTOR_CYCLE.includes(v)) tutorLanguage = v;
+  } catch {}
+}
+function persistTutor() {
+  try { localStorage.setItem(TUTOR_STORAGE_KEY, tutorLanguage); } catch {}
+}
+function tutorPayloadForServer() {
+  if (tutorLanguage === "off") return null;
+  return { mode: true, language: tutorLanguage };
+}
+function refreshTutorToggleUi() {
+  const btn = document.getElementById("tutor-toggle-btn");
+  if (!btn) return;
+  btn.dataset.tutor = tutorLanguage;
+  btn.textContent = `🎓 Tutora: ${TUTOR_LABELS[tutorLanguage] || tutorLanguage}`;
+  btn.title = tutorLanguage === "off"
+    ? "Modo Tutora desactivado · click para elegir idioma"
+    : `Tutora activa (${TUTOR_LABELS[tutorLanguage]}) · click para cambiar idioma`;
+}
+function cycleTutor() {
+  const i = TUTOR_CYCLE.indexOf(tutorLanguage);
+  const next = TUTOR_CYCLE[(i + 1) % TUTOR_CYCLE.length];
+  tutorLanguage = next;
+  persistTutor();
+  refreshTutorToggleUi();
+  if (typeof appendMessage === "function") {
+    if (next === "off") {
+      appendMessage("(*Tutora de idiomas: desactivada.*)", "system");
+    } else {
+      appendMessage(`(*Tutora de idiomas: ${TUTOR_LABELS[next]}. Hina enseña con traducción y pronunciación.*)`, "system");
+    }
+  }
+}
+loadStoredTutor();
 
 let authToken = null;
 
@@ -498,6 +559,494 @@ const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 
 // =============================================================================
+// FASE 8.4 · BIBLIOTECA DE ANIMACIONES EXTERNAS (.vmd / .fbx)
+// -----------------------------------------------------------------------------
+// El usuario sube archivos .vmd (MikuMikuDance) o .fbx (Mixamo y similares).
+// Se guardan offline en IndexedDB para que sobrevivan a recargas, y se mapean
+// automáticamente al esqueleto humanoide del VRM activo.
+// Disparo por voz/texto: "baila baile_kpop" o "anima saludo_grande" etc.
+// =============================================================================
+
+// --- Mapas de retargeting ---------------------------------------------------
+// MMD usa nombres japoneses; los mapeamos a huesos humanoides VRM.
+const MMD_TO_VRM_BONE = {
+  "全ての親":   null,            // master, lo ignoramos
+  "センター":   "hips",           // center → cadera (incluye traslación)
+  "上半身":     "spine",
+  "上半身2":    "chest",
+  "首":         "neck",
+  "頭":         "head",
+  "左肩":       "leftShoulder",
+  "左腕":       "leftUpperArm",
+  "左ひじ":     "leftLowerArm",
+  "左手首":     "leftHand",
+  "右肩":       "rightShoulder",
+  "右腕":       "rightUpperArm",
+  "右ひじ":     "rightLowerArm",
+  "右手首":     "rightHand",
+  "左足":       "leftUpperLeg",
+  "左ひざ":     "leftLowerLeg",
+  "左足首":     "leftFoot",
+  "左つま先":   "leftToes",
+  "右足":       "rightUpperLeg",
+  "右ひざ":     "rightLowerLeg",
+  "右足首":     "rightFoot",
+  "右つま先":   "rightToes",
+};
+
+// FBX (Mixamo y rigs equivalentes) → VRM. Toleramos prefijos como "mixamorig:".
+const FBX_TO_VRM_BONE = {
+  Hips:           "hips",
+  Spine:          "spine",
+  Spine1:         "chest",
+  Spine2:         "upperChest",
+  Neck:           "neck",
+  Head:           "head",
+  LeftShoulder:   "leftShoulder",
+  LeftArm:        "leftUpperArm",
+  LeftForeArm:    "leftLowerArm",
+  LeftHand:       "leftHand",
+  RightShoulder:  "rightShoulder",
+  RightArm:       "rightUpperArm",
+  RightForeArm:   "rightLowerArm",
+  RightHand:      "rightHand",
+  LeftUpLeg:      "leftUpperLeg",
+  LeftLeg:        "leftLowerLeg",
+  LeftFoot:       "leftFoot",
+  LeftToeBase:    "leftToes",
+  RightUpLeg:     "rightUpperLeg",
+  RightLeg:       "rightLowerLeg",
+  RightFoot:      "rightFoot",
+  RightToeBase:   "rightToes",
+};
+
+function stripFbxPrefix(name) {
+  // "mixamorig:Hips", "mixamorig1:Hips", "Armature|Hips" → "Hips"
+  let n = String(name || "");
+  n = n.replace(/^mixamorig\d*:/i, "");
+  n = n.replace(/^Armature\|/i, "");
+  return n;
+}
+
+// --- Parser binario VMD (sin dependencias externas) -------------------------
+// Formato VMD: header 30b + nombre modelo 20b + nº motions u32 LE +
+// motions[110b] = boneName(15b SJIS) + frame u32 + pos(3·f32) + rot(4·f32) + curva(64b).
+// MMD usa coordenadas left-handed → invertimos Z en posición y signos en y/z del quat.
+let _sjisDecoder = null;
+function getSjisDecoder() {
+  if (_sjisDecoder) return _sjisDecoder;
+  try { _sjisDecoder = new TextDecoder("shift-jis", { fatal: false }); }
+  catch { _sjisDecoder = new TextDecoder("utf-8", { fatal: false }); }
+  return _sjisDecoder;
+}
+
+function parseVmd(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  const dec = getSjisDecoder();
+  if (arrayBuffer.byteLength < 50) throw new Error("VMD demasiado corto");
+  const head = dec.decode(new Uint8Array(arrayBuffer, 0, 30));
+  if (!head.startsWith("Vocaloid Motion Data")) {
+    throw new Error("No parece un .vmd válido");
+  }
+  let off = 50;
+  const motionCount = view.getUint32(off, true); off += 4;
+  const motions = [];
+  for (let i = 0; i < motionCount; i++) {
+    if (off + 111 > arrayBuffer.byteLength) break;
+    const nameBytes = new Uint8Array(arrayBuffer, off, 15);
+    let nl = 0;
+    while (nl < 15 && nameBytes[nl] !== 0) nl++;
+    const boneName = dec.decode(nameBytes.slice(0, nl));
+    off += 15;
+    const frame = view.getUint32(off, true); off += 4;
+    const px = view.getFloat32(off, true); off += 4;
+    const py = view.getFloat32(off, true); off += 4;
+    const pz = view.getFloat32(off, true); off += 4;
+    const qx = view.getFloat32(off, true); off += 4;
+    const qy = view.getFloat32(off, true); off += 4;
+    const qz = view.getFloat32(off, true); off += 4;
+    const qw = view.getFloat32(off, true); off += 4;
+    off += 64; // skip interpolation curve
+    motions.push({ boneName, frame, px, py, pz, qx, qy, qz, qw });
+  }
+  return { motions };
+}
+
+// Convierte VMD parseado → AnimationClip aplicado al VRM activo.
+// Sólo retargeteamos huesos cuyo nombre japonés exista en el mapa, así no
+// rompemos físicas/cabello del VRM.
+function buildClipFromVmd(vmd, vrm) {
+  if (!vrm?.humanoid) throw new Error("VRM sin humanoid");
+  const FPS = 30;
+  // Agrupamos motions por bone target VRM
+  const byVrmBone = new Map();
+  for (const m of vmd.motions) {
+    const vrmBoneName = MMD_TO_VRM_BONE[m.boneName];
+    if (!vrmBoneName) continue;
+    let arr = byVrmBone.get(vrmBoneName);
+    if (!arr) { arr = []; byVrmBone.set(vrmBoneName, arr); }
+    arr.push(m);
+  }
+  const tracks = [];
+  let maxTime = 0;
+  for (const [vrmBoneName, list] of byVrmBone) {
+    const bone = vrm.humanoid.getRawBoneNode(vrmBoneName);
+    if (!bone) continue;
+    list.sort((a, b) => a.frame - b.frame);
+    const times = new Float32Array(list.length);
+    const quats = new Float32Array(list.length * 4);
+    let needsPosition = vrmBoneName === "hips";
+    const pos = needsPosition ? new Float32Array(list.length * 3) : null;
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
+      const t = m.frame / FPS;
+      times[i] = t;
+      if (t > maxTime) maxTime = t;
+      // MMD → Three: invertir Z (left-handed → right-handed)
+      quats[i*4 + 0] = m.qx;
+      quats[i*4 + 1] = -m.qy;
+      quats[i*4 + 2] = -m.qz;
+      quats[i*4 + 3] = m.qw;
+      if (pos) {
+        // MMD trabaja en ~8 unidades = 1 metro (modelo PMX típico). Escalamos
+        // y sumamos la posición de descanso del hueso para no teletransportar
+        // a Hina al origen del mundo.
+        const SCALE = 0.08;
+        pos[i*3 + 0] = bone.position.x + m.px * SCALE;
+        pos[i*3 + 1] = bone.position.y + m.py * SCALE;
+        pos[i*3 + 2] = bone.position.z + (-m.pz) * SCALE;
+      }
+    }
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${bone.name}.quaternion`, times, quats));
+    if (pos) {
+      tracks.push(new THREE.VectorKeyframeTrack(`${bone.name}.position`, times, pos));
+    }
+  }
+  if (!tracks.length) throw new Error("VMD no contiene huesos compatibles con el rig");
+  return new THREE.AnimationClip("vmd_clip", maxTime > 0 ? maxTime : -1, tracks);
+}
+
+// Convierte un AnimationClip de FBX (ya cargado por FBXLoader) en un clip
+// reescrito para los huesos del VRM. Mapeamos nombres y descartamos tracks
+// de huesos que no existan en el rig humanoide.
+function retargetFbxClip(clip, vrm) {
+  if (!vrm?.humanoid) throw new Error("VRM sin humanoid");
+  const newTracks = [];
+  for (const track of clip.tracks) {
+    // track.name = "<boneName>.<property>" o "<boneName>.<property>[<index>]"
+    const dot = track.name.indexOf(".");
+    if (dot < 0) continue;
+    const rawBoneName = stripFbxPrefix(track.name.slice(0, dot));
+    const propPart = track.name.slice(dot); // ".quaternion" / ".position"
+    const vrmBoneName = FBX_TO_VRM_BONE[rawBoneName];
+    if (!vrmBoneName) continue;
+    // Sólo cadera puede mover posición — el resto sólo rota.
+    if (propPart.startsWith(".position") && vrmBoneName !== "hips") continue;
+    const bone = vrm.humanoid.getRawBoneNode(vrmBoneName);
+    if (!bone) continue;
+    let cloned = track.clone();
+    cloned.name = `${bone.name}${propPart}`;
+    if (propPart.startsWith(".position") && vrmBoneName === "hips") {
+      // Mixamo suele exportar en cm (1 unidad ≈ 1 cm). Escalamos a metros y
+      // re-anclamos sobre la posición de descanso del hueso real.
+      const SCALE = 0.01;
+      const v = cloned.values;
+      for (let i = 0; i < v.length; i += 3) {
+        v[i + 0] = bone.position.x + v[i + 0] * SCALE;
+        v[i + 1] = bone.position.y + v[i + 1] * SCALE;
+        v[i + 2] = bone.position.z + v[i + 2] * SCALE;
+      }
+    }
+    newTracks.push(cloned);
+  }
+  if (!newTracks.length) throw new Error("FBX no contiene huesos compatibles con el rig");
+  return new THREE.AnimationClip("fbx_clip", clip.duration, newTracks);
+}
+
+// --- Persistencia offline en IndexedDB --------------------------------------
+const ANIM_DB_NAME = "hina-anim-lib";
+const ANIM_DB_STORE = "animations";
+const ANIM_DB_VERSION = 1;
+let _animDbPromise = null;
+
+function openAnimDb() {
+  if (_animDbPromise) return _animDbPromise;
+  _animDbPromise = new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB no disponible"));
+      return;
+    }
+    const req = indexedDB.open(ANIM_DB_NAME, ANIM_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(ANIM_DB_STORE)) {
+        db.createObjectStore(ANIM_DB_STORE, { keyPath: "name" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _animDbPromise;
+}
+
+async function idbSaveAnim(record) {
+  const db = await openAnimDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ANIM_DB_STORE, "readwrite");
+    tx.objectStore(ANIM_DB_STORE).put(record);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbListAnims() {
+  const db = await openAnimDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ANIM_DB_STORE, "readonly");
+    const out = [];
+    const cursor = tx.objectStore(ANIM_DB_STORE).openCursor();
+    cursor.onsuccess = (e) => {
+      const c = e.target.result;
+      if (c) {
+        const v = c.value;
+        out.push({ name: v.name, type: v.type, size: v.bytes?.byteLength || 0 });
+        c.continue();
+      } else {
+        resolve(out);
+      }
+    };
+    cursor.onerror = () => reject(cursor.error);
+  });
+}
+
+async function idbGetAnim(name) {
+  const db = await openAnimDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ANIM_DB_STORE, "readonly");
+    const req = tx.objectStore(ANIM_DB_STORE).get(name);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbDeleteAnim(name) {
+  const db = await openAnimDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(ANIM_DB_STORE, "readwrite");
+    tx.objectStore(ANIM_DB_STORE).delete(name);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// --- AnimationMixer + ciclo de vida -----------------------------------------
+let currentMixer = null;
+let currentAction = null;
+let currentMixerVrm = null;
+let customAnimPlaying = false;
+
+function disposeCurrentMixer() {
+  if (!currentMixer) return;
+  try {
+    currentMixer.stopAllAction();
+    if (currentMixerVrm?.scene) currentMixer.uncacheRoot(currentMixerVrm.scene);
+    if (currentAction?.getClip) currentMixer.uncacheClip(currentAction.getClip());
+  } catch (err) {
+    console.warn("[mixer] dispose:", err);
+  }
+  currentMixer = null;
+  currentAction = null;
+  currentMixerVrm = null;
+  customAnimPlaying = false;
+}
+
+function playClipOnVrm(clip, vrm, { name = "custom", loop = false } = {}) {
+  if (!clip || !vrm) return false;
+  disposeCurrentMixer();
+  // Detén cualquier gesto procedural; el mixer toma el control de los huesos.
+  activeGesture = null;
+  currentMixer = new THREE.AnimationMixer(vrm.scene);
+  currentMixerVrm = vrm;
+  const action = currentMixer.clipAction(clip);
+  action.reset();
+  action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, loop ? Infinity : 1);
+  action.clampWhenFinished = false;
+  action.enabled = true;
+  action.play();
+  currentAction = action;
+  customAnimPlaying = true;
+  // Cuando termine, libera el mixer para devolver a Hina sus poses idle.
+  const onFinish = () => {
+    currentMixer?.removeEventListener("finished", onFinish);
+    disposeCurrentMixer();
+    // suaviza vuelta a la pose de descanso si seguimos con la misma Hina
+    try { if (currentVrm) applyDefaultRestPose(currentVrm); } catch {}
+  };
+  currentMixer.addEventListener("finished", onFinish);
+  console.log(`[anim] playing "${name}" (loop=${loop})`);
+  return true;
+}
+
+// Carga desde un File (input del usuario) o un ArrayBuffer (desde IndexedDB).
+async function loadAnimationFromBytes(name, type, bytes, vrm, opts = {}) {
+  const buf = bytes instanceof ArrayBuffer ? bytes : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  if (type === "vmd") {
+    const vmd = parseVmd(buf);
+    const clip = buildClipFromVmd(vmd, vrm);
+    return playClipOnVrm(clip, vrm, { name, loop: opts.loop ?? false });
+  }
+  if (type === "fbx") {
+    const fbxLoader = new FBXLoader();
+    const obj = fbxLoader.parse(buf, "");
+    const sourceClip = obj.animations?.[0];
+    if (!sourceClip) throw new Error("FBX sin animaciones");
+    const clip = retargetFbxClip(sourceClip, vrm);
+    return playClipOnVrm(clip, vrm, { name, loop: opts.loop ?? false });
+  }
+  throw new Error(`Tipo desconocido: ${type}`);
+}
+
+// Registry en memoria (refresca botón con el conteo).
+const animRegistry = new Map(); // name → { type, size }
+function refreshAnimUiBadge() {
+  const btn = document.getElementById("anim-upload-btn");
+  if (!btn) return;
+  const n = animRegistry.size;
+  if (n > 0) {
+    btn.classList.add("has-anims");
+    btn.textContent = `💃 Animaciones (${n})`;
+    btn.title = `${n} animación(es) guardadas. Click para añadir más. Para reproducirla di "baila <nombre>".`;
+  } else {
+    btn.classList.remove("has-anims");
+    btn.textContent = "💃 Cargar Animación";
+    btn.title = "Subir animación .vmd o .fbx (se guarda offline)";
+  }
+}
+
+async function reloadAnimRegistry() {
+  try {
+    const items = await idbListAnims();
+    animRegistry.clear();
+    for (const it of items) animRegistry.set(it.name, { type: it.type, size: it.size });
+    refreshAnimUiBadge();
+  } catch (err) {
+    console.warn("[anim-lib] no se pudo leer IndexedDB:", err);
+  }
+}
+
+// "anim_baile_kpop.vmd" → "baile_kpop". Se normaliza para hacer match suave.
+function deriveAnimName(filename) {
+  const dot = filename.lastIndexOf(".");
+  let base = dot > 0 ? filename.slice(0, dot) : filename;
+  base = base.replace(/^anim[_-]/i, "").trim();
+  return base.toLowerCase().replace(/\s+/g, "_");
+}
+function detectAnimExtension(filename) {
+  const m = /\.(vmd|fbx)$/i.exec(filename || "");
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Subir una o varias animaciones.
+async function importAnimationFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  const files = Array.from(fileList);
+  let saved = 0, failed = 0;
+  for (const file of files) {
+    const ext = detectAnimExtension(file.name);
+    if (!ext) { failed++; continue; }
+    try {
+      showLoadBar(`Procesando ${file.name}…`);
+      const buf = await file.arrayBuffer();
+      // Validación rápida: intentamos parsear contra un VRM ficticio sólo para
+      // VMD (el binario es estricto y rápido). Si falla, no guardamos basura.
+      if (ext === "vmd") {
+        try { parseVmd(buf); }
+        catch (e) { throw new Error(`VMD inválido: ${e.message}`); }
+      }
+      const name = deriveAnimName(file.name);
+      await idbSaveAnim({ name, type: ext, bytes: buf, addedAt: Date.now() });
+      animRegistry.set(name, { type: ext, size: buf.byteLength });
+      saved++;
+      appendMessage(
+        `(*Animación guardada como "${name}". Para reproducirla di: "baila ${name}".*)`,
+        "system",
+      );
+    } catch (err) {
+      console.error("[anim-lib] no se pudo guardar", file.name, err);
+      failed++;
+      appendMessage(`(*No pude guardar "${file.name}": ${err.message}*)`, "system");
+    } finally {
+      hideLoadBar(400);
+    }
+  }
+  refreshAnimUiBadge();
+  // Si solo subió una y existe currentVrm, la reproducimos al toque.
+  if (saved === 1 && failed === 0 && currentVrm) {
+    const lastName = deriveAnimName(files[files.length - 1].name);
+    playSavedAnimation(lastName).catch(() => {});
+  }
+}
+
+async function playSavedAnimation(name) {
+  if (!currentVrm) {
+    appendMessage("(*No hay modelo cargado para animar.*)", "system");
+    return false;
+  }
+  const norm = String(name || "").toLowerCase().replace(/\s+/g, "_");
+  // match exacto, luego match parcial
+  let key = animRegistry.has(norm) ? norm : null;
+  if (!key) {
+    for (const k of animRegistry.keys()) {
+      if (k.includes(norm) || norm.includes(k)) { key = k; break; }
+    }
+  }
+  if (!key) {
+    appendMessage(`(*No encuentro la animación "${name}". Súbela primero o di "qué animaciones tengo".*)`, "system");
+    return false;
+  }
+  const meta = animRegistry.get(key);
+  try {
+    showLoadBar(`Cargando animación "${key}"…`);
+    const rec = await idbGetAnim(key);
+    if (!rec) throw new Error("registro vacío");
+    await loadAnimationFromBytes(key, meta.type, rec.bytes, currentVrm, { loop: false });
+    hideLoadBar(300);
+    return true;
+  } catch (err) {
+    console.error("[anim-lib] play falló", err);
+    hideLoadBar(400);
+    appendMessage(`(*No pude reproducir "${key}": ${err.message}*)`, "system");
+    return false;
+  }
+}
+
+// Detector de comando: "baila baile_kpop", "anima saludo_grande",
+// "/anim baile_kpop", "reproduce baile_kpop".
+const ANIM_TRIGGERS = [
+  /\b(?:baila|báilame|bailame|danza)\s+([\p{L}0-9_\- ]{2,40})/iu,
+  /\b(?:anima|reproduce|pon)\s+(?:la\s+animaci[oó]n\s+)?([\p{L}0-9_\- ]{2,40})/iu,
+  /^\/anim(?:aci[oó]n)?\s+([\p{L}0-9_\- ]{2,40})/iu,
+];
+function detectSavedAnimCommand(text) {
+  if (!text || animRegistry.size === 0) return null;
+  for (const re of ANIM_TRIGGERS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const candidate = m[1].trim().toLowerCase().replace(/\s+/g, "_");
+    if (!candidate) continue;
+    // Solo dispara si coincide con algo guardado (parcial cuenta).
+    if (animRegistry.has(candidate)) return candidate;
+    for (const k of animRegistry.keys()) {
+      if (k.includes(candidate) || candidate.includes(k)) return k;
+    }
+  }
+  return null;
+}
+
+// Pre-carga el registry al arrancar (no bloquea el render).
+reloadAnimRegistry().catch(() => {});
+
+// =============================================================================
 // FASE 7 · BARRA DE PROGRESO GLOBAL (carga de outfits y animaciones)
 // =============================================================================
 
@@ -596,6 +1145,13 @@ function pickInitialOutfit() {
 
 function disposeVrm(vrm) {
   if (!vrm) return;
+  // FASE 8.4 · Si había una animación externa montada sobre este VRM, la
+  // detenemos y desreferenciamos antes de tirar el modelo. Si no, el mixer
+  // queda apuntando a un Object3D huérfano y se acumula RAM al cambiar de
+  // outfit varias veces.
+  if (currentMixerVrm === vrm) {
+    disposeCurrentMixer();
+  }
   scene.remove(vrm.scene);
   vrm.scene.traverse((obj) => {
     if (obj.geometry) obj.geometry.dispose?.();
@@ -1222,6 +1778,26 @@ if (vrmUploadBtn && vrmFileInput) {
     await loadCustomVrmFromFile(f);
     vrmFileInput.value = "";
   });
+}
+
+// FASE 8.4 · BOTÓN CARGAR ANIMACIÓN EXTERNA (.vmd / .fbx)
+const animUploadBtn = document.getElementById("anim-upload-btn");
+const animFileInput = document.getElementById("anim-file-input");
+if (animUploadBtn && animFileInput) {
+  animUploadBtn.addEventListener("click", () => animFileInput.click());
+  animFileInput.addEventListener("change", async (e) => {
+    const files = e.target.files;
+    if (files && files.length) await importAnimationFiles(files);
+    animFileInput.value = "";
+  });
+  refreshAnimUiBadge();
+}
+
+// FASE 8.4 · BOTÓN MODO TUTORA UNIVERSAL DE IDIOMAS
+const tutorToggleBtn = document.getElementById("tutor-toggle-btn");
+if (tutorToggleBtn) {
+  tutorToggleBtn.addEventListener("click", () => cycleTutor());
+  refreshTutorToggleUi();
 }
 
 // FASE 8.2 · BOTÓN CARGAR TEXTURA EXTERNA
@@ -2662,6 +3238,7 @@ async function askGemini(userText) {
     history: chatHistory.slice(-HISTORY_WINDOW),
     memory: distilledMemoryForServer(),
     context: buildLocalContext(),
+    tutor: tutorPayloadForServer(),
   };
   try {
     return await postChatOnce(payload);
@@ -2685,6 +3262,7 @@ async function analyzeWithFiles(userText, attachments) {
     memory: distilledMemoryForServer(),
     context: buildLocalContext(),
     cameraEmpathy,
+    tutor: tutorPayloadForServer(),
     files: attachments.map((a) => ({
       name: a.name,
       mime: a.mime,
@@ -2828,6 +3406,22 @@ async function handleUserMessage(text) {
       pushHistory("model", reply);
       speakResponse(reply);
     }
+    return;
+  }
+
+  // FASE 8.4 · "baila <nombre>" / "anima <nombre>" → animación externa guardada
+  // Va ANTES del comando procedural "baila", así si el usuario subió un .vmd
+  // llamado "baile_kpop", la frase "baila baile_kpop" reproduce el archivo
+  // completo en vez de quedarse en el gesto procedural genérico.
+  const savedAnim = detectSavedAnimCommand(trimmed);
+  if (savedAnim && attachments.length === 0) {
+    const reply = `Va, te enseño "${savedAnim}".`;
+    appendMessage(reply, "bot");
+    pushHistory("model", reply);
+    speakResponse(reply);
+    playSavedAnimation(savedAnim).catch((err) => {
+      console.error("[anim-lib] dispatch falló", err);
+    });
     return;
   }
 
@@ -3356,10 +3950,17 @@ function animate() {
     const elapsed = clock.elapsedTime;
 
     if (currentVrm) {
-      const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
-      if (spine && !activeGesture) {
-        // respiración idle (solo si no estamos en un gesto activo)
-        spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
+      // FASE 8.4 · Si hay animación externa (.vmd / .fbx) corriendo en el
+      // mixer, ÉL es quien manda sobre los huesos: saltamos respiración idle
+      // y gestos procedurales para que no peleen contra la animación.
+      if (currentMixer && currentMixerVrm === currentVrm) {
+        currentMixer.update(delta);
+      } else {
+        const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
+        if (spine && !activeGesture) {
+          // respiración idle (solo si no estamos en un gesto activo)
+          spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
+        }
       }
 
       const expressionManager = currentVrm.expressionManager;
@@ -3389,7 +3990,8 @@ function animate() {
         expressionManager.setValue("blink", blinkValue);
       }
 
-      tickGesture();
+      // Los gestos procedurales sólo se ejecutan si el mixer NO está activo.
+      if (!customAnimPlaying) tickGesture();
 
       currentVrm.update(delta);
     }

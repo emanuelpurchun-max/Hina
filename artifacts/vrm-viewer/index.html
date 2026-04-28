@@ -645,6 +645,16 @@
         transition: background 0.15s ease;
       }
       .tool-btn:hover { background: rgba(255, 255, 255, 0.14); }
+      /* FASE 8.4 · Tutora activa cambia color para que se vea de un vistazo */
+      #tutor-toggle-btn[data-tutor]:not([data-tutor="off"]) {
+        background: rgba(110, 231, 183, 0.18);
+        border-color: rgba(110, 231, 183, 0.65);
+      }
+      /* FASE 8.4 · Animación externa cargada → botón con tinte morado */
+      #anim-upload-btn.has-anims {
+        background: rgba(176, 107, 255, 0.18);
+        border-color: rgba(176, 107, 255, 0.55);
+      }
 
       /* Botón de pantalla completa (esquina inferior izquierda) */
       #fullscreen-toggle {
@@ -757,6 +767,7 @@
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+          "fflate": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/fflate.module.js",
           "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.1/lib/three-vrm.module.min.js"
         }
       }
@@ -824,6 +835,14 @@
       <button id="texture-upload-btn" class="tool-btn" type="button" title="Subir .png o .jpg como textura de ropa">
         🎨 Cargar Textura
       </button>
+      <!-- FASE 8.4 · Cargador externo de animaciones (.vmd / .fbx) -->
+      <button id="anim-upload-btn" class="tool-btn" type="button" title="Subir animación .vmd o .fbx (se guarda offline)">
+        💃 Cargar Animación
+      </button>
+      <!-- FASE 8.4 · Modo Tutora Universal de Idiomas -->
+      <button id="tutor-toggle-btn" class="tool-btn" type="button" data-tutor="off" title="Modo Tutora de idiomas (cualquier idioma)">
+        🎓 Tutora: OFF
+      </button>
       <button id="keys-manager-btn" class="tool-btn" type="button" title="Actualizar las claves de las APIs">
         🔑 Gestor de APIs
       </button>
@@ -834,6 +853,7 @@
 
     <input type="file" id="vrm-file-input" accept=".vrm" hidden />
     <input type="file" id="texture-file-input" accept="image/png,image/jpeg,image/webp" hidden />
+    <input type="file" id="anim-file-input" accept=".vmd,.fbx" hidden multiple />
 
     <!-- FASE 8.2 · Modal de gestor de APIs -->
     <div id="keys-modal" role="dialog" aria-modal="true" aria-labelledby="keys-title-el">
