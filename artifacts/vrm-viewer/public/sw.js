@@ -1,4 +1,4 @@
-const CACHE_VERSION = "hina-v8";
+const CACHE_VERSION = "hina-v8-1";
 
 const PRECACHE_URLS = [
   "./",

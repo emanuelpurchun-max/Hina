@@ -601,6 +601,36 @@ function normalizeToHinaPose(vrm) {
     node.rotation.y = rot.y;
     node.rotation.z = rot.z;
   }
+  // 3) refresca matrices del rig por si VRM o three las recalculan tarde
+  vrm.scene.updateMatrixWorld(true);
+}
+
+// FASE 8.1 · Anti-T-pose por FUERZA BRUTA universal:
+// algunos archivos VRM (casual2/3, pijama, cosplay y otros importados de
+// MMD/VRoid) sobreescriben la pose en sus primeros frames porque tienen
+// constraints o animaciones internas. Forzamos la A-pose cada 100 ms durante
+// 3 s tras CUALQUIER carga, sin importar el outfit.
+let _activePoseLockerId = null;
+function forcePoseFor3Seconds(vrm) {
+  if (_activePoseLockerId) {
+    clearInterval(_activePoseLockerId);
+    _activePoseLockerId = null;
+  }
+  const start = Date.now();
+  // primera aplicación inmediata
+  normalizeToHinaPose(vrm);
+  const id = setInterval(() => {
+    // si el usuario cambió de modelo, abortamos el bucle
+    if (currentVrm !== vrm || Date.now() - start > 3000) {
+      clearInterval(id);
+      if (_activePoseLockerId === id) _activePoseLockerId = null;
+      return;
+    }
+    // no pisar gestos activos (saluda, baila, etc.) — solo durante idle real
+    if (typeof activeGesture !== "undefined" && activeGesture) return;
+    normalizeToHinaPose(vrm);
+  }, 100);
+  _activePoseLockerId = id;
 }
 
 // alias retrocompatible: cualquier llamada vieja sigue funcionando
@@ -647,17 +677,31 @@ function extractClothTextures(vrm) {
   return out;
 }
 
+// FASE 8.1 · Aplica texturas de un modelo fuente sobre el modelo activo.
+// REGLAS DE LIMPIEZA:
+//   1) Antes de pisar el `map` actual, llamamos a `dispose()` sobre la textura
+//      previa (libera GPU memory en Xiaomi).
+//   2) Forzamos `texture.needsUpdate = true` y `material.needsUpdate = true`
+//      en TODOS los materiales del modelo, no solo los swapped, para que el
+//      VRM recompile shaders y las texturas nuevas se suban a la GPU.
+//   3) Si el material es MToon (VRM), también limpiamos `emissiveMap` y
+//      `shadeColorTexture` que algunos VRoid usan en lugar de `map`.
 function applyClothTextures(vrm, source) {
   if (!source || !source.length) return 0;
   let count = 0;
+  const touchedMaterials = new Set();
+
   vrm.scene.traverse((obj) => {
     if (!obj.material) return;
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
     for (const m of mats) {
-      if (!m.name || !m.map) continue;
+      if (!m.name) continue;
+      touchedMaterials.add(m);
+      if (!isClothMaterial(m.name)) continue;
+
       // 1) match exacto por nombre de material
       let pick = source.find((s) => s.materialName === m.name);
-      // 2) fallback por categoría (Tops, Bottoms, etc.)
+      // 2) fallback por categoría (tops/bottoms/dress/...)
       if (!pick) {
         const cat = CLOTH_KEYWORDS.find((k) =>
           m.name.toLowerCase().includes(k),
@@ -668,14 +712,36 @@ function applyClothTextures(vrm, source) {
           );
         }
       }
-      if (pick) {
-        m.map = pick.texture;
-        if (m.color && pick.color) m.color.copy(pick.color);
-        m.needsUpdate = true;
-        count += 1;
+      if (!pick) continue;
+
+      // 3) dispose() de la textura anterior antes de pisar
+      if (m.map && m.map !== pick.texture) {
+        try { m.map.dispose(); } catch {}
       }
+      m.map = pick.texture;
+      m.map.needsUpdate = true;
+
+      if (m.color && pick.color) m.color.copy(pick.color);
+      // MToon: limpia mapas auxiliares para que el shader use el nuevo `map`
+      if (m.shadeMultiplyTexture) {
+        try { m.shadeMultiplyTexture.dispose(); } catch {}
+        m.shadeMultiplyTexture = null;
+      }
+      if (m.emissiveMap) {
+        try { m.emissiveMap.dispose(); } catch {}
+        m.emissiveMap = null;
+      }
+      count += 1;
     }
   });
+
+  // Forzamos recompilación de TODOS los materiales tocados/visitados:
+  // en Xiaomi a veces el shader queda con la textura vieja en cache si
+  // no marcamos needsUpdate explícitamente.
+  for (const m of touchedMaterials) {
+    m.needsUpdate = true;
+    if (m.map) m.map.needsUpdate = true;
+  }
   return count;
 }
 
@@ -762,17 +828,10 @@ function loadOutfit(name, opts = {}) {
         if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
         captureRestPose(vrm);
 
-        // FASE 8 · Watcher anti-T-pose: algunos VRMs (casual2, casual3, pijama,
-        // cosplay) tienen una pose interna que sobreescribe la nuestra durante
-        // los primeros frames. Volvemos a normalizar 5 frames y a 100/300 ms.
-        const reapply = () => {
-          if (currentVrm === vrm) normalizeToHinaPose(vrm);
-        };
-        for (let i = 1; i <= 5; i++) {
-          requestAnimationFrame(reapply);
-        }
-        setTimeout(reapply, 100);
-        setTimeout(reapply, 300);
+        // FASE 8.1 · Anti-T-pose UNIVERSAL por fuerza bruta: el bucle reaplica
+        // la A-pose cada 100 ms durante 3 s para cualquier modelo VRM,
+        // garantizando que los brazos bajen sin importar el archivo.
+        forcePoseFor3Seconds(vrm);
 
         // ancla la cámara al hueso de la cabeza (J_Bip_C_Head)
         anchorCameraToHead(vrm);

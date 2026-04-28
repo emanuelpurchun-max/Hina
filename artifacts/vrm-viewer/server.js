@@ -15,7 +15,9 @@ const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "llama3-70b-8192";
+// FASE 8.1 · llama3-70b-8192 fue retirado por Groq (devolvía 404 "model not found").
+// El reemplazo oficial es llama-3.3-70b-versatile (128k de contexto, mejor en español).
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 // Códigos por los que la redundancia automática salta al otro cerebro
 const FALLBACK_STATUSES = new Set([401, 403, 408, 429, 500, 502, 503, 504]);
@@ -340,36 +342,52 @@ async function callGemini({ apiKey, systemInstruction, contents, generationConfi
 // FASE 8 · CEREBRO ALTERNATIVO (Groq · llama3-70b-8192)
 // =============================================================================
 
+// Convierte el formato de Gemini (role + parts[]) al estándar de OpenAI Chat
+// Completions que usa Groq. Reglas estrictas para evitar 400:
+//   • content nunca puede ser cadena vacía → si una "part" no tiene texto la
+//     saltamos y, si un mensaje queda vacío, se descarta entero.
+//   • role solo puede ser system/user/assistant.
+//   • Garantiza al menos un mensaje de usuario (Groq rechaza payloads sin user).
 function geminiContentsToOpenAiMessages(systemInstruction, contents) {
-  const messages = [{ role: "system", content: systemInstruction }];
-  for (const c of contents) {
+  const messages = [];
+  const sys = (systemInstruction || "").toString().trim();
+  if (sys) messages.push({ role: "system", content: sys });
+  for (const c of contents || []) {
     const text = (c?.parts || [])
       .map((p) => (typeof p?.text === "string" ? p.text : ""))
       .filter(Boolean)
-      .join("\n");
+      .join("\n")
+      .trim();
     if (!text) continue;
     messages.push({
-      role: c.role === "model" ? "assistant" : "user",
+      role: c?.role === "model" ? "assistant" : "user",
       content: text,
     });
+  }
+  // Si por alguna razón no hay user (p. ej. solo system), añadimos un eco mínimo.
+  if (!messages.some((m) => m.role === "user")) {
+    messages.push({ role: "user", content: "Hola" });
   }
   return messages;
 }
 
 async function callGroq({ apiKey, systemInstruction, contents, generationConfig }) {
   const messages = geminiContentsToOpenAiMessages(systemInstruction, contents);
+  // Payload 100 % OpenAI Chat Completions — sin parámetros de Gemini.
+  const payload = {
+    model: GROQ_MODEL,
+    messages,
+    temperature: Math.min(2, Math.max(0, generationConfig?.temperature ?? 0.7)),
+    max_tokens: Math.min(8192, generationConfig?.maxOutputTokens ?? 600),
+    stream: false,
+  };
   const upstream = await fetch(GROQ_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages,
-      temperature: generationConfig?.temperature ?? 0.7,
-      max_tokens: generationConfig?.maxOutputTokens ?? 600,
-    }),
+    body: JSON.stringify(payload),
   });
   return upstream;
 }

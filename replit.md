@@ -86,6 +86,22 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Service worker bumped to `hina-v8`** para evictar el caché viejo en navegadores Xiaomi.
 - **Secrets requeridos**: `GEMINI_API_KEY`, `GROQ_API_KEY`, `HINA_PASSPHRASE` (los tres ya configurados; `/health` los reporta todos `true`).
 
+### Phase 8.1 — Hotfix de cerebro dual, T-pose universal y limpieza de texturas (April 2026)
+
+- **Fix HTTP 404 en Groq** (`server.js`): el modelo `llama3-70b-8192` fue retirado por Groq. Ahora usamos **`llama-3.3-70b-versatile`** (128 k de contexto, mejor en español). Verificado con un POST directo a la API: `HTTP 200 OK`.
+- **Fix HTTP 400 en Groq**: `geminiContentsToOpenAiMessages()` reescrito con reglas estrictas OpenAI Chat Completions:
+  - `content` nunca puede estar vacío (se descarta el mensaje).
+  - El `system` solo se añade si tiene contenido.
+  - Garantiza al menos un mensaje `user` (Groq lo rechaza si solo hay `system`).
+  - El payload ya no incluye parámetros propios de Gemini; sólo `model`, `messages`, `temperature` (clamp 0–2), `max_tokens` (clamp ≤ 8192), `stream:false`.
+- **Anti-T-pose UNIVERSAL por fuerza bruta** (`script.js`): nueva función `forcePoseFor3Seconds(vrm)` que ejecuta `normalizeToHinaPose(vrm)` cada 100 ms durante 3 s tras CUALQUIER `loadOutfit`. El bucle se autocancela si el usuario cambia de modelo a mitad de camino o si hay un gesto activo (saluda/baila), para no pisar las animaciones reales. `normalizeToHinaPose` también llama a `vrm.scene.updateMatrixWorld(true)` para forzar el refresco del rig.
+- **Intercambio de texturas Omni-Render** (`applyClothTextures`):
+  - Llama `dispose()` sobre la textura previa antes de pisar `material.map` (libera memoria de GPU en Xiaomi).
+  - Marca `texture.needsUpdate = true` Y `material.needsUpdate = true` en TODOS los materiales del modelo, no solo los swapped — fuerza recompilación de shader MToon.
+  - Limpia `shadeMultiplyTexture` y `emissiveMap` (mapas auxiliares de MToon que algunos VRoid usan en lugar de `map`).
+- **Preservado intacto**: `anchorCameraToHead(vrm)` (cámara al hueso `J_Bip_C_Head`), sistema de baile (`GESTURES`, `tickAutonomousAnimations`), análisis multimodal de SENATI (PDFs/fotos siguen forzando Gemini en `/analyze`).
+- **Service worker bumped to `hina-v8-1`**.
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
