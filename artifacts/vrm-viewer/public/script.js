@@ -355,11 +355,68 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0, 1.45, 1.2);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+// FASE 8.2.1 · Inicialización defensiva del renderer.
+// En algunos navegadores (Xiaomi con "ahorro de datos", Chrome sin GPU,
+// pestañas que ya consumieron sus contextos WebGL) el primer intento puede
+// fallar. Probamos primero con calidad alta y degradamos a un perfil mínimo.
+function createRendererSafe() {
+  // perfil 1: calidad alta
+  try {
+    return new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: "high-performance",
+      failIfMajorPerformanceCaveat: false,
+    });
+  } catch (e) {
+    console.warn("[renderer] perfil alto falló, probando bajo:", e);
+  }
+  // perfil 2: ahorro (sin AA, sin alpha)
+  try {
+    return new THREE.WebGLRenderer({
+      antialias: false,
+      alpha: false,
+      powerPreference: "low-power",
+      failIfMajorPerformanceCaveat: false,
+      precision: "mediump",
+    });
+  } catch (e) {
+    console.error("[renderer] WebGL no disponible:", e);
+    return null;
+  }
+}
+
+const renderer = createRendererSafe();
+if (!renderer) {
+  // muestra un mensaje claro al usuario en lugar de quedar en negro;
+  // el chat y el resto de la UI siguen funcionando.
+  const banner = document.createElement("div");
+  banner.style.cssText =
+    "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);" +
+    "max-width:340px;padding:18px;border-radius:12px;z-index:9999;" +
+    "background:rgba(20,20,35,.95);color:#fff;border:1px solid rgba(255,255,255,.18);" +
+    "font:13px/1.4 system-ui;text-align:center;backdrop-filter:blur(10px);";
+  banner.innerHTML =
+    "<b>WebGL no disponible</b><br><br>" +
+    "Tu navegador no pudo crear el contexto 3D para mostrar a Hina. " +
+    "Cierra otras pestañas pesadas, desactiva el modo ahorro de datos " +
+    "y vuelve a entrar.<br><br>El chat sigue funcionando.";
+  document.body.appendChild(banner);
+  throw new Error("WebGL context creation failed");
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
+
+// si el contexto WebGL se pierde más tarde (RAM agotada en Xiaomi al cargar
+// otro modelo), avisamos en consola en lugar de quedar en negro.
+renderer.domElement.addEventListener("webglcontextlost", (ev) => {
+  ev.preventDefault();
+  console.warn("[renderer] contexto WebGL perdido");
+});
+renderer.domElement.addEventListener("webglcontextrestored", () => {
+  console.log("[renderer] contexto WebGL restaurado");
+});
 
 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444466, 0.8);
 scene.add(hemiLight);
