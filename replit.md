@@ -102,6 +102,19 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Preservado intacto**: `anchorCameraToHead(vrm)` (cámara al hueso `J_Bip_C_Head`), sistema de baile (`GESTURES`, `tickAutonomousAnimations`), análisis multimodal de SENATI (PDFs/fotos siguen forzando Gemini en `/analyze`).
 - **Service worker bumped to `hina-v8-1`**.
 
+## Phase 8.2 — SpringBones, PoseGuard, Emociones, Uploads y Gestor de APIs
+
+- **Motor de pelo y ropa** (`activateSpringBones`): tras la carga de cada VRM se llama a `vrm.springBoneManager.reset()` y se afinan `stiffness`/`dragForce` para que pelo y partes sueltas reaccionen a la gravedad y al baile sin atravesar el cuerpo (los colliders del .vrm ya vienen registrados por `VRMLoaderPlugin`). Loguea cantidad de joints y collider-groups en consola para depurar en Xiaomi.
+- **PoseGuard universal** (`startPoseGuard`): el bucle reaplica la A-pose CADA 50 ms durante 4 s tras CUALQUIER carga (50 ms × 4 s en lugar de 100 ms × 3 s de la 8.1). Garantiza que TODOS los modelos (incluyendo los importados por el usuario) bajen los brazos. Se autocancela ante un cambio de modelo o un gesto activo. Alias retrocompatible `forcePoseFor3Seconds`.
+- **Mapeo exacto de outfits** (`WARDROBE_SYNONYMS`): los patrones explícitos `casual 1/2/3` se MUEVEN ARRIBA del patrón genérico `casual` para que `\bcasual\b` no matchee primero y devuelva un casual aleatorio cuando el usuario pidió uno específico.
+- **Analizador de emociones por BlendShapes** (`detectEmotion` + `applyEmotion` + `expressFromText`): scanner de keywords sobre el texto que va a decir Hina (jaja/triste/celosa/wow/tranquila…) → enciende la expresión `happy/sad/angry/surprised/relaxed` durante 2.2 s y la apaga. Hookeado en `appendMessage` cuando `sender === "bot"`.
+- **Carga de VRM externos** (`loadCustomVrmFromFile`): botón "📦 Cargar VRM" en el tool-stack. Acepta un `.vrm` cualquiera, ejecuta `URL.createObjectURL`, lo carga con el mismo loader, dispone del modelo anterior, ancla la cámara a la cabeza y arranca PoseGuard + SpringBones.
+- **Carga de texturas externas** (`applyImageAsTexture`): botón "🎨 Cargar Textura". Aplica un `.png/.jpg/.webp` a TODOS los materiales de ropa del modelo activo. Hace `dispose()` sobre la textura anterior y limpia `shadeMultiplyTexture`/`emissiveMap` (anti z-fighting).
+- **Gestor de claves de API** (modal `#keys-modal` + endpoints `GET /keys/status` y `POST /keys`): permite actualizar `GROQ_API_KEY` y `GEMINI_API_KEY` desde la interfaz. Las claves se guardan en memoria (`_runtimeKeys`) en el proceso Node — NO se persisten a disco y se borran al reiniciar. `getApiKey()`/`getGroqKey()` priorizan el override sobre el Secret de Replit. Endpoints protegidos por `authMiddleware` (HINA_PASSPHRASE).
+- **Pantalla completa** (`#fullscreen-toggle` + clase `body.solo-modelo`): oculta chat, armario, brain-toggle, tool-stack, info y reproductor de música. Solo queda el modelo 3D y el botón ⤢ para volver.
+- **Preservado intacto**: `anchorCameraToHead`, sistema de gestos/baile y `tickAutonomousAnimations`.
+- **Service worker bumped to `hina-v8-2`**.
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages

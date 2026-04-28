@@ -605,32 +605,248 @@ function normalizeToHinaPose(vrm) {
   vrm.scene.updateMatrixWorld(true);
 }
 
-// FASE 8.1 · Anti-T-pose por FUERZA BRUTA universal:
-// algunos archivos VRM (casual2/3, pijama, cosplay y otros importados de
-// MMD/VRoid) sobreescriben la pose en sus primeros frames porque tienen
-// constraints o animaciones internas. Forzamos la A-pose cada 100 ms durante
-// 3 s tras CUALQUIER carga, sin importar el outfit.
-let _activePoseLockerId = null;
-function forcePoseFor3Seconds(vrm) {
-  if (_activePoseLockerId) {
-    clearInterval(_activePoseLockerId);
-    _activePoseLockerId = null;
+// FASE 8.2 · PoseGuard (anti-T-pose universal):
+// loop que ejecuta normalizeToHinaPose CADA 50 ms durante 4 segundos tras la
+// carga de CUALQUIER VRM. Garantiza que los brazos bajen incluso en archivos
+// con constraints internas, animaciones embebidas o springbones que tiran de
+// los huesos antes de estabilizarse. Se autocancela si:
+//   • el usuario cambia de modelo antes de los 4 s
+//   • hay un gesto activo (saluda/baila) → no pisamos animaciones reales
+let _poseGuardId = null;
+function startPoseGuard(vrm, { intervalMs = 50, durationMs = 4000 } = {}) {
+  if (_poseGuardId) {
+    clearInterval(_poseGuardId);
+    _poseGuardId = null;
   }
   const start = Date.now();
-  // primera aplicación inmediata
+  // primera aplicación inmediata, en el mismo tick
   normalizeToHinaPose(vrm);
   const id = setInterval(() => {
-    // si el usuario cambió de modelo, abortamos el bucle
-    if (currentVrm !== vrm || Date.now() - start > 3000) {
+    if (currentVrm !== vrm || Date.now() - start > durationMs) {
       clearInterval(id);
-      if (_activePoseLockerId === id) _activePoseLockerId = null;
+      if (_poseGuardId === id) _poseGuardId = null;
       return;
     }
-    // no pisar gestos activos (saluda, baila, etc.) — solo durante idle real
     if (typeof activeGesture !== "undefined" && activeGesture) return;
     normalizeToHinaPose(vrm);
-  }, 100);
-  _activePoseLockerId = id;
+  }, intervalMs);
+  _poseGuardId = id;
+}
+// alias retrocompatible (la versión anterior se llamaba así)
+const forcePoseFor3Seconds = startPoseGuard;
+
+// FASE 8.2 · MOTOR DE PELO Y ROPA (VRM SpringBones)
+// three-vrm v2 carga springbones automáticamente vía VRMLoaderPlugin y los
+// actualiza en cada `vrm.update(delta)`. Esta función:
+//   1) loguea la cantidad de joints/colliders detectados (debug en Xiaomi).
+//   2) llama a `reset()` para que pelo y ropa caigan a su posición de reposo.
+//   3) baja `stiffness` y sube `dragForce` ligeramente cuando son extremos,
+//      así el pelo no queda rígido como casco al bailar.
+function activateSpringBones(vrm) {
+  const mgr = vrm.springBoneManager || vrm.springBoneManager0;
+  if (!mgr) {
+    console.log("[springbones] modelo sin springbones — pelo estático");
+    return;
+  }
+  try {
+    if (typeof mgr.reset === "function") mgr.reset();
+    const joints = mgr.joints || mgr.springBoneJoints || [];
+    const colliders = mgr.colliderGroups || [];
+    let tuned = 0;
+    for (const j of joints) {
+      const s = j.settings || j;
+      if (s && typeof s.stiffness === "number" && s.stiffness > 4) {
+        s.stiffness = 4;
+        tuned += 1;
+      }
+      if (s && typeof s.dragForce === "number" && s.dragForce < 0.2) {
+        s.dragForce = 0.25;
+        tuned += 1;
+      }
+    }
+    console.log(
+      `[springbones] activado · joints=${joints.length || joints.size || "?"} colliderGroups=${colliders.length || colliders.size || 0} tuned=${tuned}`,
+    );
+  } catch (err) {
+    console.warn("[springbones] no se pudo afinar:", err);
+  }
+}
+
+// FASE 8.2 · ANALIZADOR DE EMOCIONES POR BLENDSHAPES
+// Lee el texto que va a decir Hina y enciende la expresión que mejor lo
+// representa: happy / sad / angry / surprised / relaxed / neutral.
+// Usa keywords (rápido y sin llamada a API) y va degradando la expresión.
+const EMOTION_KEYWORDS = {
+  happy: [
+    "jaja", "jeje", "feliz", "alegr", "encanta", "me gusta", "qué lindo",
+    "que lindo", "genial", "increíble", "increible", "amo", "te quiero",
+    "❤", "💕", "🥰", "😊", "😄",
+  ],
+  sad: [
+    "triste", "lo siento", "perdón", "perdon", "extrañ", "extran",
+    "duele", "lloro", "😢", "😞", "💔",
+  ],
+  angry: [
+    "molest", "enoj", "celosa", "celos", "no me gusta que", "ya basta",
+    "😠", "😤",
+  ],
+  surprised: [
+    "¿en serio?", "en serio?", "¡qué", "¡que", "wow", "guau", "no puedo creer",
+    "😮", "😲", "¡!",
+  ],
+  relaxed: [
+    "tranquil", "descans", "relaj", "respira", "dulces sueños", "buenas noches",
+  ],
+};
+
+const EMOTION_CHANNELS = ["happy", "sad", "angry", "surprised", "relaxed", "neutral"];
+
+function detectEmotion(text) {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  let best = null;
+  let bestScore = 0;
+  for (const [emo, kws] of Object.entries(EMOTION_KEYWORDS)) {
+    let score = 0;
+    for (const kw of kws) if (lower.includes(kw)) score += 1;
+    if (score > bestScore) {
+      bestScore = score;
+      best = emo;
+    }
+  }
+  return best;
+}
+
+let _emotionDecayId = null;
+function applyEmotion(emo, intensity = 0.85, holdMs = 2200) {
+  if (!currentVrm || !currentVrm.expressionManager) return;
+  const em = currentVrm.expressionManager;
+  // apaga las otras emociones
+  for (const ch of EMOTION_CHANNELS) {
+    if (ch !== emo) {
+      try { em.setValue(ch, 0); } catch {}
+    }
+  }
+  if (!emo) return;
+  try { em.setValue(emo, intensity); } catch {}
+  if (_emotionDecayId) clearTimeout(_emotionDecayId);
+  _emotionDecayId = setTimeout(() => {
+    if (!currentVrm || !currentVrm.expressionManager) return;
+    try { currentVrm.expressionManager.setValue(emo, 0); } catch {}
+  }, holdMs);
+}
+
+function expressFromText(text) {
+  const emo = detectEmotion(text);
+  if (emo) applyEmotion(emo);
+}
+
+// FASE 8.2 · APLICAR UNA IMAGEN COMO TEXTURA (.png/.jpg subido por el usuario)
+// Aplica el png/jpg sobre TODOS los materiales de ropa del modelo activo.
+// Limpia la textura anterior con dispose() y fuerza needsUpdate.
+function applyImageAsTexture(imageUrl) {
+  if (!currentVrm) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const tl = new THREE.TextureLoader();
+    tl.load(
+      imageUrl,
+      (tex) => {
+        tex.flipY = false; // VRM/glTF usan flipY=false
+        tex.colorSpace = THREE.SRGBColorSpace;
+        let count = 0;
+        const touched = new Set();
+        currentVrm.scene.traverse((obj) => {
+          if (!obj.material) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const m of mats) {
+            if (!m.name) continue;
+            touched.add(m);
+            if (!isClothMaterial(m.name)) continue;
+            if (m.map && m.map !== tex) {
+              try { m.map.dispose(); } catch {}
+            }
+            if (m.shadeMultiplyTexture) {
+              try { m.shadeMultiplyTexture.dispose(); } catch {}
+              m.shadeMultiplyTexture = null;
+            }
+            if (m.emissiveMap) {
+              try { m.emissiveMap.dispose(); } catch {}
+              m.emissiveMap = null;
+            }
+            m.map = tex;
+            m.map.needsUpdate = true;
+            m.needsUpdate = true;
+            count += 1;
+          }
+        });
+        // marca recompilación en TODO lo demás también
+        for (const m of touched) {
+          m.needsUpdate = true;
+          if (m.map) m.map.needsUpdate = true;
+        }
+        console.log(`[texture-upload] aplicada en ${count} materiales`);
+        resolve(count > 0);
+      },
+      undefined,
+      (err) => {
+        console.error("[texture-upload] error", err);
+        resolve(false);
+      },
+    );
+  });
+}
+
+// FASE 8.2 · CARGAR UN .vrm SUBIDO POR EL USUARIO (reemplaza al modelo activo)
+async function loadCustomVrmFromFile(file) {
+  if (!file) return false;
+  const url = URL.createObjectURL(file);
+  const label = `Cargando ${file.name}…`;
+  showLoadBar(label);
+  if (info) info.textContent = label;
+  return new Promise((resolve) => {
+    loader.load(
+      url,
+      (gltf) => {
+        const vrm = gltf.userData.vrm;
+        if (!vrm) {
+          console.error("[vrm-upload] el archivo no es un VRM válido");
+          if (info) info.textContent = "Archivo no es un VRM válido";
+          hideLoadBar(1500);
+          URL.revokeObjectURL(url);
+          resolve(false);
+          return;
+        }
+        VRMUtils.removeUnnecessaryVertices(gltf.scene);
+        VRMUtils.removeUnnecessaryJoints(gltf.scene);
+        vrm.scene.traverse((obj) => { obj.frustumCulled = false; });
+        VRMUtils.rotateVRM0(vrm);
+        if (currentVrm) disposeVrm(currentVrm);
+        scene.add(vrm.scene);
+        currentVrm = vrm;
+        currentOutfit = `__custom__:${file.name}`;
+        applyDefaultRestPose(vrm);
+        if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
+        captureRestPose(vrm);
+        startPoseGuard(vrm, { intervalMs: 50, durationMs: 4000 });
+        activateSpringBones(vrm);
+        anchorCameraToHead(vrm);
+        renderWardrobeButtons();
+        if (info) info.textContent = `Hina lista (${file.name})`;
+        hideLoadBar(500);
+        appendMessage(`(*Hina ahora lleva un modelo personalizado: ${file.name}*)`, "system");
+        URL.revokeObjectURL(url);
+        resolve(true);
+      },
+      (p) => updateLoadBar(p.loaded || 0, p.total || 0, label),
+      (err) => {
+        console.error("[vrm-upload] error", err);
+        if (info) info.textContent = `Error al cargar ${file.name}`;
+        hideLoadBar(1500);
+        URL.revokeObjectURL(url);
+        resolve(false);
+      },
+    );
+  });
 }
 
 // alias retrocompatible: cualquier llamada vieja sigue funcionando
@@ -828,10 +1044,11 @@ function loadOutfit(name, opts = {}) {
         if (vrm.lookAt) vrm.lookAt.target = lookAtTarget;
         captureRestPose(vrm);
 
-        // FASE 8.1 · Anti-T-pose UNIVERSAL por fuerza bruta: el bucle reaplica
-        // la A-pose cada 100 ms durante 3 s para cualquier modelo VRM,
-        // garantizando que los brazos bajen sin importar el archivo.
-        forcePoseFor3Seconds(vrm);
+        // FASE 8.2 · PoseGuard universal: 50 ms × 4 s
+        startPoseGuard(vrm, { intervalMs: 50, durationMs: 4000 });
+
+        // FASE 8.2 · Activación explícita de SpringBones (pelo + ropa suelta)
+        activateSpringBones(vrm);
 
         // ancla la cámara al hueso de la cabeza (J_Bip_C_Head)
         anchorCameraToHead(vrm);
@@ -921,6 +1138,112 @@ const brainToggleBtn = document.getElementById("brain-toggle");
 if (brainToggleBtn) {
   brainToggleBtn.addEventListener("click", () => toggleBrain());
   refreshBrainToggleUi();
+}
+
+// FASE 8.2 · BOTÓN PANTALLA COMPLETA (modo solo-modelo)
+const fullscreenBtn = document.getElementById("fullscreen-toggle");
+if (fullscreenBtn) {
+  fullscreenBtn.addEventListener("click", () => {
+    document.body.classList.toggle("solo-modelo");
+    const isSolo = document.body.classList.contains("solo-modelo");
+    fullscreenBtn.textContent = isSolo ? "⤢" : "⛶";
+    fullscreenBtn.title = isSolo ? "Mostrar la interfaz" : "Mostrar solo el modelo 3D";
+  });
+}
+
+// FASE 8.2 · BOTÓN CARGAR VRM EXTERNO
+const vrmUploadBtn = document.getElementById("vrm-upload-btn");
+const vrmFileInput = document.getElementById("vrm-file-input");
+if (vrmUploadBtn && vrmFileInput) {
+  vrmUploadBtn.addEventListener("click", () => vrmFileInput.click());
+  vrmFileInput.addEventListener("change", async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    await loadCustomVrmFromFile(f);
+    vrmFileInput.value = "";
+  });
+}
+
+// FASE 8.2 · BOTÓN CARGAR TEXTURA EXTERNA
+const textureUploadBtn = document.getElementById("texture-upload-btn");
+const textureFileInput = document.getElementById("texture-file-input");
+if (textureUploadBtn && textureFileInput) {
+  textureUploadBtn.addEventListener("click", () => textureFileInput.click());
+  textureFileInput.addEventListener("change", async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const ok = await applyImageAsTexture(url);
+    URL.revokeObjectURL(url);
+    appendMessage(
+      ok
+        ? `(*Hina ahora lleva la textura: ${f.name}*)`
+        : `No pude aplicar "${f.name}" como textura.`,
+      "system",
+    );
+    textureFileInput.value = "";
+  });
+}
+
+// FASE 8.2 · GESTOR DE CLAVES DE API (modal)
+const keysModal = document.getElementById("keys-modal");
+const keysManagerBtn = document.getElementById("keys-manager-btn");
+const keysCancel = document.getElementById("keys-cancel");
+const keysSave = document.getElementById("keys-save");
+const keyGeminiInput = document.getElementById("key-gemini");
+const keyGroqInput = document.getElementById("key-groq");
+const keyGeminiStatus = document.getElementById("key-gemini-status");
+const keyGroqStatus = document.getElementById("key-groq-status");
+
+function _keyStatusLabel(s) {
+  if (!s || !s.present) return "vacía";
+  return s.source === "runtime" ? "activa (runtime)" : "activa (Secret)";
+}
+async function refreshKeysStatus() {
+  try {
+    const r = await fetch("/keys/status", {
+      headers: authHeaders(),
+    });
+    if (!r.ok) throw new Error("status " + r.status);
+    const j = await r.json();
+    if (keyGeminiStatus) keyGeminiStatus.textContent = "Gemini: " + _keyStatusLabel(j.gemini);
+    if (keyGroqStatus) keyGroqStatus.textContent = "Groq: " + _keyStatusLabel(j.groq);
+  } catch (err) {
+    if (keyGeminiStatus) keyGeminiStatus.textContent = "Gemini: ?";
+    if (keyGroqStatus) keyGroqStatus.textContent = "Groq: ?";
+  }
+}
+if (keysManagerBtn && keysModal) {
+  keysManagerBtn.addEventListener("click", () => {
+    keysModal.classList.add("visible");
+    if (keyGeminiInput) keyGeminiInput.value = "";
+    if (keyGroqInput) keyGroqInput.value = "";
+    refreshKeysStatus();
+  });
+}
+if (keysCancel && keysModal) {
+  keysCancel.addEventListener("click", () => keysModal.classList.remove("visible"));
+}
+if (keysSave) {
+  keysSave.addEventListener("click", async () => {
+    const payload = {};
+    if (keyGeminiInput) payload.gemini = keyGeminiInput.value.trim();
+    if (keyGroqInput) payload.groq = keyGroqInput.value.trim();
+    try {
+      const r = await fetch("/keys", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error("status " + r.status);
+      await refreshKeysStatus();
+      appendMessage("(*Claves de API actualizadas en memoria.*)", "system");
+      setTimeout(() => keysModal.classList.remove("visible"), 600);
+    } catch (err) {
+      console.error("[keys] error", err);
+      appendMessage("No pude guardar las claves.", "system");
+    }
+  });
 }
 
 const wardrobeOverlay = document.getElementById("wardrobe-overlay");
@@ -1256,6 +1579,10 @@ const chatInput = document.getElementById("chat-input");
 
 function appendMessage(text, sender, opts = {}) {
   if (!chatLog) return null;
+  // FASE 8.2 · Si es respuesta de Hina, dispara la expresión facial coincidente
+  if (sender === "bot") {
+    try { expressFromText(text); } catch {}
+  }
   const msg = document.createElement("div");
   msg.className = `chat-message ${sender}`;
 
@@ -1581,16 +1908,18 @@ const WARDROBE_SYNONYMS = [
   { outfit: "sexy2", patterns: [
     "sexy 2", "otra sexy", "más sexy", "mas sexy",
   ]},
-  // casual aleatorio
+  // FASE 8.2 · MAPEO EXACTO: los explícitos VAN PRIMERO. Si esto se pone
+  // después del patrón genérico "casual", el regex `\bcasual\b` matchea antes
+  // y termina cargando un casual aleatorio en lugar del que pediste.
+  { outfit: "casual1", patterns: ["casual 1", "casual1", "outfit 1"] },
+  { outfit: "casual2", patterns: ["casual 2", "casual2", "outfit 2"] },
+  { outfit: "casual3", patterns: ["casual 3", "casual3", "outfit 3"] },
+  // casual aleatorio (solo si NO se pidió un número específico)
   { outfit: "__casual_random__", patterns: [
     "ropa casual", "casual", "ponte casual", "ropa de calle",
     "ropa de estudio", "ropa cómoda", "ropa comoda", "cámbiate", "cambiate",
     "cambio de ropa", "otra ropa",
   ]},
-  // explicítos
-  { outfit: "casual1", patterns: ["casual 1", "outfit 1"] },
-  { outfit: "casual2", patterns: ["casual 2", "outfit 2"] },
-  { outfit: "casual3", patterns: ["casual 3", "outfit 3"] },
   { outfit: "hina", patterns: ["modo default", "ropa original", "tu ropa de siempre"] },
 ];
 

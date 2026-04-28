@@ -37,3 +37,5 @@ externalPort = 80
 [userenv]
 
 [userenv.shared]
+
+[nix]

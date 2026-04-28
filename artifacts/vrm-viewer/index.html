@@ -576,6 +576,138 @@
         border-color: rgba(96, 165, 250, 0.6);
         background: rgba(96, 165, 250, 0.18);
       }
+
+      /* FASE 8.2 · Stack vertical de herramientas (debajo del cerebro) */
+      #tool-stack {
+        position: fixed;
+        top: 56px;
+        left: 16px;
+        z-index: 70;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-width: 168px;
+      }
+      .tool-btn {
+        background: rgba(15, 15, 30, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        text-align: left;
+        transition: background 0.15s ease;
+      }
+      .tool-btn:hover { background: rgba(255, 255, 255, 0.14); }
+
+      /* Botón de pantalla completa (esquina inferior izquierda) */
+      #fullscreen-toggle {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 70;
+        background: rgba(15, 15, 30, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+      }
+      #fullscreen-toggle:hover { background: rgba(255, 255, 255, 0.14); }
+      /* Modo "solo modelo": oculta toda la UI pero deja el botón de salir */
+      body.solo-modelo #chat-container,
+      body.solo-modelo #wardrobe-overlay,
+      body.solo-modelo #brain-toggle,
+      body.solo-modelo #tool-stack,
+      body.solo-modelo #info,
+      body.solo-modelo #music-overlay {
+        display: none !important;
+      }
+
+      /* FASE 8.2 · Modal de gestor de APIs */
+      #keys-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 250;
+        background: rgba(0, 0, 0, 0.62);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+      }
+      #keys-modal.visible { display: flex; }
+      .keys-card {
+        width: 100%;
+        max-width: 380px;
+        background: rgba(20, 20, 35, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 14px;
+        padding: 18px;
+        color: #fff;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+      }
+      .keys-title {
+        font-size: 15px;
+        font-weight: 700;
+        margin-bottom: 4px;
+      }
+      .keys-hint {
+        font-size: 11px;
+        opacity: 0.72;
+        margin-bottom: 14px;
+      }
+      .keys-row { margin-bottom: 12px; }
+      .keys-row label {
+        display: block;
+        font-size: 11px;
+        opacity: 0.85;
+        margin-bottom: 4px;
+      }
+      .keys-row input {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.08);
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        font-family: monospace;
+        font-size: 12px;
+        box-sizing: border-box;
+      }
+      .keys-status {
+        font-size: 10px;
+        margin-top: 4px;
+        opacity: 0.7;
+      }
+      .keys-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .keys-actions button {
+        flex: 1;
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(255, 255, 255, 0.08);
+        color: #fff;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .keys-actions button.primary {
+        background: linear-gradient(120deg, rgba(96, 165, 250, 0.45), rgba(176, 107, 255, 0.45));
+        border-color: rgba(176, 107, 255, 0.7);
+      }
+      .keys-actions button:hover { filter: brightness(1.15); }
     </style>
     <script type="importmap">
       {
@@ -633,6 +765,50 @@
       data-brain="gemini"
       title="Cerebro activo: Gemini · click para cambiar"
     >🧠 Gemini</button>
+
+    <!-- FASE 8.2 · Stack de herramientas (cargar VRM, cargar textura, gestor de APIs) -->
+    <div id="tool-stack">
+      <button id="vrm-upload-btn" class="tool-btn" type="button" title="Subir un .vrm externo">
+        📦 Cargar VRM
+      </button>
+      <button id="texture-upload-btn" class="tool-btn" type="button" title="Subir .png o .jpg como textura de ropa">
+        🎨 Cargar Textura
+      </button>
+      <button id="keys-manager-btn" class="tool-btn" type="button" title="Actualizar las claves de las APIs">
+        🔑 Gestor de APIs
+      </button>
+    </div>
+
+    <!-- FASE 8.2 · Pantalla completa (modo solo-modelo) -->
+    <button id="fullscreen-toggle" type="button" title="Mostrar solo el modelo 3D">⛶</button>
+
+    <input type="file" id="vrm-file-input" accept=".vrm" hidden />
+    <input type="file" id="texture-file-input" accept="image/png,image/jpeg,image/webp" hidden />
+
+    <!-- FASE 8.2 · Modal de gestor de APIs -->
+    <div id="keys-modal" role="dialog" aria-modal="true" aria-labelledby="keys-title-el">
+      <div class="keys-card">
+        <div class="keys-title" id="keys-title-el">Gestor de claves de API</div>
+        <div class="keys-hint">
+          Las claves se guardan en memoria del servidor — se borran al reiniciar.
+          Deja el campo vacío y guarda para volver a usar el Secret de Replit.
+        </div>
+        <div class="keys-row">
+          <label for="key-gemini">GEMINI_API_KEY</label>
+          <input id="key-gemini" type="password" autocomplete="off" placeholder="AIza…" />
+          <div class="keys-status" id="key-gemini-status">—</div>
+        </div>
+        <div class="keys-row">
+          <label for="key-groq">GROQ_API_KEY</label>
+          <input id="key-groq" type="password" autocomplete="off" placeholder="gsk_…" />
+          <div class="keys-status" id="key-groq-status">—</div>
+        </div>
+        <div class="keys-actions">
+          <button id="keys-cancel" type="button">Cerrar</button>
+          <button id="keys-save" type="button" class="primary">Guardar</button>
+        </div>
+      </div>
+    </div>
 
     <div id="chat-container">
       <div id="chat-log"></div>

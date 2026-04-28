@@ -39,12 +39,17 @@ function sanitizeSecret(raw) {
     .trim();
 }
 
+// FASE 8.2 · Override en memoria para las API keys.
+// Permite que el usuario actualice GROQ/GEMINI desde la UI sin tocar Secrets.
+// Las claves NO se persisten a disco; viven solo mientras corre el proceso.
+const _runtimeKeys = { gemini: null, groq: null };
+
 function getApiKey() {
-  return sanitizeSecret(process.env.GEMINI_API_KEY);
+  return _runtimeKeys.gemini || sanitizeSecret(process.env.GEMINI_API_KEY);
 }
 
 function getGroqKey() {
-  return sanitizeSecret(process.env.GROQ_API_KEY);
+  return _runtimeKeys.groq || sanitizeSecret(process.env.GROQ_API_KEY);
 }
 
 function getPassphrase() {
@@ -483,6 +488,39 @@ export function createApiApp() {
       hasGroqKey: brains.groq,
       hasPassphrase: Boolean(getPassphrase()),
       brains,
+    });
+  });
+
+  // FASE 8.2 · Gestor de APIs (auth-protegido)
+  // GET → estado actual (qué claves hay y si vienen de env o runtime)
+  // POST → actualiza la clave en memoria; "" o null → restaura el valor del env
+  app.get("/keys/status", authMiddleware, (_req, res) => {
+    res.json({
+      gemini: {
+        present: Boolean(getApiKey()),
+        source: _runtimeKeys.gemini ? "runtime" : (process.env.GEMINI_API_KEY ? "env" : "none"),
+      },
+      groq: {
+        present: Boolean(getGroqKey()),
+        source: _runtimeKeys.groq ? "runtime" : (process.env.GROQ_API_KEY ? "env" : "none"),
+      },
+    });
+  });
+
+  app.post("/keys", authMiddleware, (req, res) => {
+    const { gemini, groq } = req.body || {};
+    if (typeof gemini === "string") {
+      const v = sanitizeSecret(gemini);
+      _runtimeKeys.gemini = v || null;
+    }
+    if (typeof groq === "string") {
+      const v = sanitizeSecret(groq);
+      _runtimeKeys.groq = v || null;
+    }
+    res.json({
+      ok: true,
+      gemini: { present: Boolean(getApiKey()), source: _runtimeKeys.gemini ? "runtime" : "env" },
+      groq: { present: Boolean(getGroqKey()), source: _runtimeKeys.groq ? "runtime" : "env" },
     });
   });
 
