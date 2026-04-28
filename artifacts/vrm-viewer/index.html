@@ -515,6 +515,49 @@
         transition: width 0.18s ease;
       }
 
+      /* FASE 8.3 · Widget de rendimiento (FPS + RAM) */
+      #perf-widget {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 75;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        background: rgba(15, 15, 30, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        pointer-events: auto;
+        cursor: pointer;
+        user-select: none;
+        line-height: 1;
+      }
+      #perf-widget .pw-item { display: inline-flex; gap: 4px; align-items: center; }
+      #perf-widget .pw-label { opacity: 0.6; font-size: 10px; }
+      #perf-widget .pw-value { font-weight: 700; min-width: 30px; text-align: right; }
+      #perf-widget[data-fps="good"] .pw-fps .pw-value { color: #6ee7b7; }
+      #perf-widget[data-fps="ok"]   .pw-fps .pw-value { color: #fde68a; }
+      #perf-widget[data-fps="bad"]  .pw-fps .pw-value { color: #fca5a5; }
+      #perf-widget .pw-saver {
+        display: none;
+        background: rgba(253, 224, 71, 0.18);
+        border: 1px solid rgba(253, 224, 71, 0.55);
+        color: #fde68a;
+        padding: 2px 6px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      body.perf-saver #perf-widget .pw-saver { display: inline-block; }
+      body.solo-modelo #perf-widget { display: none !important; }
+
       /* FASE 7 · selector rápido de armario */
       #wardrobe-overlay {
         position: fixed;
@@ -755,6 +798,13 @@
         <span class="pct" id="load-bar-pct">0%</span>
       </div>
       <div id="load-bar-track"><div id="load-bar-fill"></div></div>
+    </div>
+
+    <!-- FASE 8.3 · Widget de FPS / RAM / modo ahorro -->
+    <div id="perf-widget" data-fps="good" title="Click para alternar el modo ahorro manualmente">
+      <span class="pw-item pw-fps"><span class="pw-label">FPS</span><span class="pw-value" id="pw-fps-value">60</span></span>
+      <span class="pw-item pw-ram"><span class="pw-label">RAM</span><span class="pw-value" id="pw-ram-value">—</span></span>
+      <span class="pw-saver" id="pw-saver-badge">AHORRO</span>
     </div>
 
     <div id="wardrobe-overlay" aria-label="Armario rápido"></div>

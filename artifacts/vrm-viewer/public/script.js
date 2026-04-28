@@ -256,14 +256,17 @@ const MEMORY_MAX_SUMMARIES = 10;
 const HISTORY_WINDOW = 3;
 const SUMMARY_EVERY_N_USER_MSGS = 10;
 
+// FASE 8.3 · Emanuel es el dueño del proyecto: su nombre se siembra por
+// defecto para que Hina lo recuerde aunque sea su primera vez en el navegador.
 const DEFAULT_MEMORY = {
   profile: {
-    // En blanco a propósito: Hina te conocerá desde cero.
+    name: "Emanuel",
   },
   highestAffectionReached: AFFECT_INITIAL,
   highestLevelReached: "distant",
   summaries: [],
   totalUserMessages: 0,
+  lastSeenAt: null,
 };
 
 let memory = structuredClone(DEFAULT_MEMORY);
@@ -2971,21 +2974,66 @@ async function handleUserMessage(text) {
   }
 }
 
+// FASE 8.3 · resumen humano del tiempo desde la última visita
+function describeTimeSince(lastSeenAt) {
+  if (!Number.isFinite(lastSeenAt)) return "";
+  const diffMs = Date.now() - lastSeenAt;
+  if (diffMs < 60 * 1000) return "";
+  const minutes = Math.round(diffMs / 60000);
+  if (minutes < 60) return `Hace ${minutes} min que no nos veíamos.`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `Hace ${hours} ${hours === 1 ? "hora" : "horas"} que no hablábamos.`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "Ayer hablamos por última vez.";
+  if (days < 7) return `Hace ${days} días que no aparecías.`;
+  const weeks = Math.round(days / 7);
+  if (weeks === 1) return "Ya pasó una semana desde la última vez.";
+  return `Hace ${weeks} semanas que no nos veíamos.`;
+}
+
 function showInitialGreeting() {
   if (!chatLog) return;
   const lvl = affectionLevel(affectionScore);
+  // FASE 8.3 · si por alguna razón el perfil quedó vacío, sembramos "Emanuel"
+  // para que Hina nunca empiece preguntándole el nombre a su dueño.
+  if (!memory.profile) memory.profile = {};
+  if (!memory.profile.name) {
+    memory.profile.name = "Emanuel";
+    persistMemory();
+  }
+  const userName = memory.profile.name;
+
   let greeting;
-  if (!memory.profile?.name) {
-    greeting =
-      "Hola. No sé quién eres todavía. Si quieres, dime tu nombre.";
-  } else if (lvl === "distant") {
-    greeting = `Hola, ${memory.profile.name}. Sigo sin conocerte bien, así que iré con calma.`;
+  if (lvl === "distant") {
+    greeting = `Hola, ${userName}. Sigo sin conocerte bien, así que iré con calma.`;
   } else if (lvl === "confidant") {
-    greeting = `Hola, ${memory.profile.name}. Me alegra verte por aquí.`;
+    greeting = `Hola, ${userName}. Me alegra verte por aquí.`;
   } else if (lvl === "affectionate") {
-    greeting = `Hola, ${memory.profile.name}. ¿Cómo va tu día? Me preocupo por ti.`;
+    greeting = `Hola, ${userName}. ¿Cómo va tu día? Me preocupo por ti.`;
   } else {
-    greeting = `¡${memory.profile.name}! Te estaba esperando.`;
+    greeting = `¡${userName}! Te estaba esperando.`;
+  }
+
+  // FASE 8.3 · si tenemos historial previo, recordamos algo concreto:
+  //   - tiempo desde la última visita
+  //   - máximo nivel de relación alcanzado
+  //   - último resumen guardado
+  const sinceText = describeTimeSince(memory.lastSeenAt);
+  if (sinceText) greeting += ` ${sinceText}`;
+
+  const peakRanking = { distant: 0, confidant: 1, affectionate: 2, girlfriend: 3 };
+  if (
+    (peakRanking[memory.highestLevelReached] ?? 0) > (peakRanking[lvl] ?? 0)
+  ) {
+    greeting += ` Recuerdo que llegamos a ser muy cercanos antes — no quiero perder eso.`;
+  }
+
+  const lastSummary = Array.isArray(memory.summaries) && memory.summaries.length
+    ? memory.summaries[memory.summaries.length - 1]
+    : null;
+  if (lastSummary && typeof lastSummary === "string" && lastSummary.length > 12) {
+    const trimmed = lastSummary.length > 140 ? lastSummary.slice(0, 137) + "…" : lastSummary;
+    greeting += ` La última vez hablamos de esto: ${trimmed}`;
   }
 
   // FASE 7 · menciona el clima de Piura si lo tenemos
@@ -3000,6 +3048,10 @@ function showInitialGreeting() {
 
   appendMessage(greeting, "bot");
   pushHistory("model", greeting);
+
+  // FASE 8.3 · marca la visita actual y persiste para el próximo arranque
+  memory.lastSeenAt = Date.now();
+  persistMemory();
 
   // FASE 7 · saludo automático al iniciar sesión
   playGesture("saluda");
@@ -3167,69 +3219,214 @@ if (musicCloseBtn) {
 bootstrapAuth();
 
 // =============================================================================
+// FASE 8.3 · WIDGET DE RENDIMIENTO + MODO AHORRO
+// =============================================================================
+//
+// Pinta FPS y uso de RAM (solo Chromium expone performance.memory) en una
+// píldora central superior. Cuando el FPS cae sosteniblemente por debajo de
+// 20, activa un modo ahorro que apaga las springbones (pelo + ropa) — la
+// física es lo más caro en un Xiaomi de gama media. El modo se desactiva
+// solo cuando el FPS vuelve a subir de 35 durante 4 s seguidos.
+
+const PERF_WIDGET_EL = document.getElementById("perf-widget");
+const PERF_FPS_EL = document.getElementById("pw-fps-value");
+const PERF_RAM_EL = document.getElementById("pw-ram-value");
+
+const PERF_FPS_LOW = 20;
+const PERF_FPS_HIGH = 35;
+const PERF_LOW_DWELL_MS = 3000;
+const PERF_HIGH_DWELL_MS = 4000;
+const PERF_UI_INTERVAL_MS = 500;
+
+let perfFps = 60;
+let perfFrames = 0;
+let perfLastFpsAt = performance.now();
+let perfLastUiAt = 0;
+let perfLowSince = 0;
+let perfHighSince = 0;
+let perfSaverActive = false;
+let perfSaverManual = false;
+
+function setPerfSaverMode(active, { manual = false } = {}) {
+  if (perfSaverActive === active && perfSaverManual === manual) return;
+  perfSaverActive = active;
+  perfSaverManual = manual;
+  document.body.classList.toggle("perf-saver", active);
+  // apaga / reactiva springbones de TODAS las posibles instancias VRM
+  if (currentVrm) {
+    try {
+      const mgr = currentVrm.springBoneManager || currentVrm.springBoneManager0;
+      if (mgr) {
+        const joints = mgr.joints || mgr.springBoneJoints || [];
+        const it = joints.values ? joints.values() : joints;
+        for (const j of it) {
+          const s = j?.settings || j;
+          if (s && typeof s.stiffness === "number") {
+            if (active) {
+              if (s._origStiffness == null) s._origStiffness = s.stiffness;
+              if (s._origDrag == null) s._origDrag = s.dragForce;
+              s.stiffness = 0;
+              s.dragForce = 1;
+            } else if (s._origStiffness != null) {
+              s.stiffness = s._origStiffness;
+              s.dragForce = s._origDrag ?? s.dragForce;
+            }
+          }
+        }
+        if (active && typeof mgr.reset === "function") mgr.reset();
+      }
+    } catch (err) {
+      console.warn("[perf-saver] no se pudo togglear springbones:", err);
+    }
+  }
+  console.log(`[perf-saver] ${active ? "ACTIVADO" : "desactivado"}${manual ? " (manual)" : ""}`);
+}
+
+function updatePerfWidget(now) {
+  perfFrames++;
+  const elapsed = now - perfLastFpsAt;
+  if (elapsed >= 1000) {
+    perfFps = Math.round((perfFrames * 1000) / elapsed);
+    perfFrames = 0;
+    perfLastFpsAt = now;
+
+    // Modo ahorro automático: latch con dwell-time para evitar parpadeo
+    if (!perfSaverManual) {
+      if (perfFps < PERF_FPS_LOW) {
+        perfHighSince = 0;
+        if (!perfLowSince) perfLowSince = now;
+        if (!perfSaverActive && now - perfLowSince >= PERF_LOW_DWELL_MS) {
+          setPerfSaverMode(true);
+        }
+      } else if (perfFps > PERF_FPS_HIGH) {
+        perfLowSince = 0;
+        if (!perfHighSince) perfHighSince = now;
+        if (perfSaverActive && now - perfHighSince >= PERF_HIGH_DWELL_MS) {
+          setPerfSaverMode(false);
+        }
+      } else {
+        // zona intermedia: no decidimos nada nuevo
+        perfLowSince = 0;
+        perfHighSince = 0;
+      }
+    }
+  }
+
+  if (now - perfLastUiAt < PERF_UI_INTERVAL_MS) return;
+  perfLastUiAt = now;
+  if (PERF_FPS_EL) PERF_FPS_EL.textContent = String(perfFps);
+  if (PERF_WIDGET_EL) {
+    PERF_WIDGET_EL.dataset.fps =
+      perfFps >= 45 ? "good" : perfFps >= 25 ? "ok" : "bad";
+  }
+  if (PERF_RAM_EL) {
+    const mem = performance && performance.memory;
+    if (mem && mem.usedJSHeapSize) {
+      PERF_RAM_EL.textContent = `${Math.round(mem.usedJSHeapSize / 1048576)}MB`;
+    } else {
+      PERF_RAM_EL.textContent = "n/a";
+    }
+  }
+}
+
+// Click en la píldora → toggle manual del modo ahorro (ignora el automático
+// hasta el próximo ciclo de FPS).
+if (PERF_WIDGET_EL) {
+  PERF_WIDGET_EL.addEventListener("click", () => {
+    setPerfSaverMode(!perfSaverActive, { manual: !perfSaverActive });
+  });
+}
+
+// =============================================================================
 // LOOP DE RENDERIZADO (idle: respiración + parpadeo + gestos)
 // =============================================================================
+//
+// FASE 8.3 · todo el cuerpo del loop está envuelto en try/catch para que un
+// error puntual (p. ej. una textura corrupta de un VRM externo) NO mate el
+// `requestAnimationFrame`. El loop sigue y la app no se cuelga.
+
+let lastRenderError = 0;
 
 function animate() {
   requestAnimationFrame(animate);
+  const now = performance.now();
 
-  const delta = clock.getDelta();
-  const elapsed = clock.elapsedTime;
+  try {
+    const delta = clock.getDelta();
+    const elapsed = clock.elapsedTime;
 
-  if (currentVrm) {
-    const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
-    if (spine && !activeGesture) {
-      // respiración idle (solo si no estamos en un gesto activo)
-      spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
-    }
-
-    const expressionManager = currentVrm.expressionManager;
-    if (expressionManager) {
-      blinkTimer += delta;
-      if (blinkPhase === 0 && blinkTimer >= nextBlinkAt) {
-        blinkPhase = 1;
-        blinkTimer = 0;
+    if (currentVrm) {
+      const spine = currentVrm.humanoid?.getNormalizedBoneNode("spine");
+      if (spine && !activeGesture) {
+        // respiración idle (solo si no estamos en un gesto activo)
+        spine.rotation.x = Math.sin(elapsed * 1.5) * 0.025;
       }
 
-      let blinkValue = 0;
-      if (blinkPhase === 1) {
-        blinkValue = Math.min(blinkTimer / 0.08, 1);
-        if (blinkValue >= 1) {
-          blinkPhase = 2;
+      const expressionManager = currentVrm.expressionManager;
+      if (expressionManager) {
+        blinkTimer += delta;
+        if (blinkPhase === 0 && blinkTimer >= nextBlinkAt) {
+          blinkPhase = 1;
           blinkTimer = 0;
         }
-      } else if (blinkPhase === 2) {
-        blinkValue = 1 - Math.min(blinkTimer / 0.12, 1);
-        if (blinkValue <= 0) {
-          blinkPhase = 0;
-          blinkTimer = 0;
-          nextBlinkAt = 2 + Math.random() * 3;
-          blinkValue = 0;
+
+        let blinkValue = 0;
+        if (blinkPhase === 1) {
+          blinkValue = Math.min(blinkTimer / 0.08, 1);
+          if (blinkValue >= 1) {
+            blinkPhase = 2;
+            blinkTimer = 0;
+          }
+        } else if (blinkPhase === 2) {
+          blinkValue = 1 - Math.min(blinkTimer / 0.12, 1);
+          if (blinkValue <= 0) {
+            blinkPhase = 0;
+            blinkTimer = 0;
+            nextBlinkAt = 2 + Math.random() * 3;
+            blinkValue = 0;
+          }
         }
+        expressionManager.setValue("blink", blinkValue);
       }
-      expressionManager.setValue("blink", blinkValue);
+
+      tickGesture();
+
+      currentVrm.update(delta);
     }
 
-    tickGesture();
+    // FASE 7 · cámara anclada al hueso de la cabeza (J_Bip_C_Head)
+    // así no se pierde la vista frontal al bailar, girar o cambiar de ropa.
+    if (headBoneRef) {
+      const worldPos = new THREE.Vector3();
+      headBoneRef.getWorldPosition(worldPos);
+      worldPos.add(HEAD_OFFSET);
+      // suavizado para que el cambio de outfit no haga "brincar" la cámara
+      controls.target.lerp(worldPos, 0.18);
+    }
 
-    currentVrm.update(delta);
+    // FASE 7 · animaciones autónomas (cada 45s, mientras esté quieta)
+    tickAutonomousAnimations();
+
+    controls.update();
+    renderer.render(scene, camera);
+  } catch (err) {
+    // Throttle: no inundamos la consola si el error se repite cada frame.
+    if (now - lastRenderError > 2000) {
+      console.warn("[render-loop] error capturado, sigo vivo:", err);
+      lastRenderError = now;
+    }
   }
 
-  // FASE 7 · cámara anclada al hueso de la cabeza (J_Bip_C_Head)
-  // así no se pierde la vista frontal al bailar, girar o cambiar de ropa.
-  if (headBoneRef) {
-    const worldPos = new THREE.Vector3();
-    headBoneRef.getWorldPosition(worldPos);
-    worldPos.add(HEAD_OFFSET);
-    // suavizado para que el cambio de outfit no haga "brincar" la cámara
-    controls.target.lerp(worldPos, 0.18);
+  // El widget de FPS/RAM debe seguir actualizando aunque el render falle,
+  // así el usuario ve claramente que algo está pasando.
+  try {
+    updatePerfWidget(now);
+  } catch (err) {
+    if (now - lastRenderError > 2000) {
+      console.warn("[perf-widget] error:", err);
+      lastRenderError = now;
+    }
   }
-
-  // FASE 7 · animaciones autónomas (cada 45s, mientras esté quieta)
-  tickAutonomousAnimations();
-
-  controls.update();
-  renderer.render(scene, camera);
 }
 
 animate();

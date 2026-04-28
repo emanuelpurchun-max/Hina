@@ -102,6 +102,20 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Preservado intacto**: `anchorCameraToHead(vrm)` (cámara al hueso `J_Bip_C_Head`), sistema de baile (`GESTURES`, `tickAutonomousAnimations`), análisis multimodal de SENATI (PDFs/fotos siguen forzando Gemini en `/analyze`).
 - **Service worker bumped to `hina-v8-1`**.
 
+## Phase 8.3 — Cerebro dual enlazado, widget de rendimiento y memoria de Emanuel (April 2026)
+
+- **APIs enlazadas**: confirmadas `GEMINI_API_KEY` y `GROQ_API_KEY` como Replit Secrets. `HINA_PASSPHRASE` debe ser solicitada al usuario (es la contraseña del overlay de acceso privado). El servidor ya tenía la lógica de cerebro dual + auto-fallback (Phase 8) — esta fase solo verifica la conexión de los Secrets.
+- **Widget de FPS / RAM** (`#perf-widget`, píldora central superior, `index.html` + `script.js`): muestra FPS contados por frame y `performance.memory.usedJSHeapSize` (Chromium) en MB. Verde ≥45, ámbar 25–44, rojo <25.
+- **Modo ahorro automático**: si el FPS cae por debajo de 20 durante 3 s seguidos, `setPerfSaverMode(true)` apaga las springbones del modelo activo (guarda los valores originales en `_origStiffness` / `_origDrag` para restaurarlos después). Cuando vuelve a subir por encima de 35 durante 4 s seguidos, restaura la física automáticamente. Click en la píldora alterna el modo manualmente (latch que ignora el automático).
+- **try/catch global en el render loop**: el cuerpo de `animate()` está envuelto en try/catch con throttling de 2 s para que un error puntual (textura corrupta, VRM externo malformado) NO mate `requestAnimationFrame`. El widget de FPS también tiene su propio try/catch.
+- **Memoria persistente reforzada**: `DEFAULT_MEMORY.profile.name` ahora es `"Emanuel"` por defecto, y `showInitialGreeting()` lo siembra otra vez si por alguna razón el perfil quedó vacío. El saludo inicial ahora incluye:
+  - Tiempo desde la última visita (`describeTimeSince(memory.lastSeenAt)` en minutos / horas / días / semanas).
+  - Mención del máximo nivel de relación alcanzado si bajó (decay).
+  - Último resumen guardado (`memory.summaries[-1]` truncado a 140 caracteres).
+  - Clima de Piura como antes.
+  - Persiste `memory.lastSeenAt = Date.now()` al final del saludo para el próximo arranque.
+- **Service worker bumped to `hina-v8-3`**.
+
 ## Phase 8.2 — SpringBones, PoseGuard, Emociones, Uploads y Gestor de APIs
 
 - **Motor de pelo y ropa** (`activateSpringBones`): tras la carga de cada VRM se llama a `vrm.springBoneManager.reset()` y se afinan `stiffness`/`dragForce` para que pelo y partes sueltas reaccionen a la gravedad y al baile sin atravesar el cuerpo (los colliders del .vrm ya vienen registrados por `VRMLoaderPlugin`). Loguea cantidad de joints y collider-groups en consola para depurar en Xiaomi.
