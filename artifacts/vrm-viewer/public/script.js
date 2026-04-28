@@ -1,8 +1,24 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+
+// FASE 8.4.1 · LAZY LOADING — el FBXLoader (~70 KB + dep fflate) y el parser
+// VMD se cargan sólo cuando el usuario realmente sube un archivo de animación.
+// Esto evita que el arranque del visor dependa de módulos pesados que pueden
+// fallar en CDN y dejar a Hina inalcanzable (boot loop / 502 percibido).
+let _fbxLoaderPromise = null;
+function loadFbxLoaderLazy() {
+  if (!_fbxLoaderPromise) {
+    _fbxLoaderPromise = import("three/addons/loaders/FBXLoader.js")
+      .then((m) => m.FBXLoader)
+      .catch((err) => {
+        _fbxLoaderPromise = null; // permite reintento si falla la red
+        throw err;
+      });
+  }
+  return _fbxLoaderPromise;
+}
 
 // =============================================================================
 // FASE 1 · ACCESO PRIVADO (frase clave)
@@ -769,22 +785,60 @@ const ANIM_DB_STORE = "animations";
 const ANIM_DB_VERSION = 1;
 let _animDbPromise = null;
 
+// FASE 8.4.1 · SAFE-LOAD — cualquier cuelgue / bloqueo del IndexedDB del
+// navegador (modo privado, cuota llena, perfil corrupto) NO debe impedir que el
+// visor arranque. Por eso openAnimDb() tiene timeout duro de 4 s y todos los
+// callers ya envuelven en try/catch + warn (la app sigue funcional sin lib).
 function openAnimDb() {
   if (_animDbPromise) return _animDbPromise;
   _animDbPromise = new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
+    if (typeof indexedDB === "undefined" || !("indexedDB" in window)) {
       reject(new Error("IndexedDB no disponible"));
       return;
     }
-    const req = indexedDB.open(ANIM_DB_NAME, ANIM_DB_VERSION);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      _animDbPromise = null; // permite reintento manual luego
+      reject(new Error("IndexedDB tardó demasiado en abrir (timeout 4 s)"));
+    }, 4000);
+    let req;
+    try {
+      req = indexedDB.open(ANIM_DB_NAME, ANIM_DB_VERSION);
+    } catch (err) {
+      clearTimeout(timer);
+      settled = true;
+      _animDbPromise = null;
+      reject(err);
+      return;
+    }
     req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(ANIM_DB_STORE)) {
-        db.createObjectStore(ANIM_DB_STORE, { keyPath: "name" });
+      try {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(ANIM_DB_STORE)) {
+          db.createObjectStore(ANIM_DB_STORE, { keyPath: "name" });
+        }
+      } catch (err) {
+        console.warn("[anim-lib] upgrade falló", err);
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(req.result);
+    };
+    req.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      _animDbPromise = null;
+      reject(req.error || new Error("IndexedDB error"));
+    };
+    req.onblocked = () => {
+      console.warn("[anim-lib] IndexedDB blocked (otra pestaña tiene una versión vieja)");
+    };
   });
   return _animDbPromise;
 }
@@ -896,7 +950,13 @@ async function loadAnimationFromBytes(name, type, bytes, vrm, opts = {}) {
     return playClipOnVrm(clip, vrm, { name, loop: opts.loop ?? false });
   }
   if (type === "fbx") {
-    const fbxLoader = new FBXLoader();
+    let FBXLoaderCtor;
+    try {
+      FBXLoaderCtor = await loadFbxLoaderLazy();
+    } catch (err) {
+      throw new Error("No pude descargar el cargador FBX (revisa tu conexión).");
+    }
+    const fbxLoader = new FBXLoaderCtor();
     const obj = fbxLoader.parse(buf, "");
     const sourceClip = obj.animations?.[0];
     if (!sourceClip) throw new Error("FBX sin animaciones");
@@ -1043,8 +1103,16 @@ function detectSavedAnimCommand(text) {
   return null;
 }
 
-// Pre-carga el registry al arrancar (no bloquea el render).
-reloadAnimRegistry().catch(() => {});
+// FASE 8.4.1 · Pre-carga el registry al arrancar de forma DEFENSIVA: si IndexedDB
+// está bloqueado/lleno/no disponible, sólo registramos en consola y seguimos.
+// Bajo NINGUNA circunstancia este try debe poder tirar el visor.
+try {
+  Promise.resolve()
+    .then(() => reloadAnimRegistry())
+    .catch((err) => console.warn("[anim-lib] boot:", err?.message || err));
+} catch (err) {
+  console.warn("[anim-lib] boot sync fail:", err?.message || err);
+}
 
 // =============================================================================
 // FASE 7 · BARRA DE PROGRESO GLOBAL (carga de outfits y animaciones)
