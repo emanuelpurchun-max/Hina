@@ -169,7 +169,28 @@ function buildTutorBlock(tutorMode, tutorLanguage) {
   ].join("\n");
 }
 
-function buildSystemPrompt(level, memory, context, cameraEmpathy, tutor) {
+// FASE 8.5 · Bloque de animaciones disponibles. Se inyecta en el system prompt
+// para que Hina sepa exactamente qué clips guardó Emanuel en su IndexedDB y
+// pueda decidir cuándo dispararlos en respuesta a frases como "haz la posec"
+// o "baila kpop". El cliente envía la lista en cada turno.
+function buildAnimationsBlock(availableAnimations) {
+  if (!Array.isArray(availableAnimations) || availableAnimations.length === 0) return "";
+  const list = availableAnimations
+    .filter((s) => typeof s === "string" && s.trim())
+    .map((s) => s.trim())
+    .slice(0, 60);
+  if (!list.length) return "";
+  return [
+    "ANIMACIONES DISPONIBLES (guardadas localmente por el usuario, listas para reproducir):",
+    list.map((n) => `- ${n}`).join("\n"),
+    "Cuando el usuario te pida explícitamente alguna de estas (por su nombre o algo que se le parezca,",
+    "p. ej. 'haz la posec', 'muestra la kpop', 'baila baile_lento'), confirma con una frase corta y natural",
+    "(\"¡Va, mira esto!\" o similar) — el cliente disparará la animación automáticamente al detectar la orden.",
+    "No inventes nombres que no estén en esta lista. Si te piden una que no existe, dilo con cariño.",
+  ].join("\n");
+}
+
+function buildSystemPrompt(level, memory, context, cameraEmpathy, tutor, availableAnimations) {
   const profile = memory?.profile || {};
   const summaries = Array.isArray(memory?.summaries)
     ? memory.summaries.slice(-3)
@@ -208,6 +229,7 @@ function buildSystemPrompt(level, memory, context, cameraEmpathy, tutor) {
     buildContextBlock(context),
     buildEmpathyBlock(cameraEmpathy),
     buildTutorBlock(tutor?.mode, tutor?.language),
+    buildAnimationsBlock(availableAnimations),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -599,8 +621,12 @@ export function createApiApp() {
     const tutor = req.body?.tutor && typeof req.body.tutor === "object"
       ? { mode: Boolean(req.body.tutor.mode), language: req.body.tutor.language }
       : null;
+    // FASE 8.5 · Animaciones disponibles enviadas por el cliente
+    const availableAnimations = Array.isArray(req.body?.availableAnimations)
+      ? req.body.availableAnimations
+      : [];
     const historyContents = sanitizeHistory(req.body?.history);
-    const systemInstruction = buildSystemPrompt(level, memory, context, false, tutor);
+    const systemInstruction = buildSystemPrompt(level, memory, context, false, tutor, availableAnimations);
 
     console.log("--- /chat ---", {
       msg: message.slice(0, 60),
@@ -609,6 +635,7 @@ export function createApiApp() {
       level,
       historyLen: historyContents.length,
       tutor: tutor?.mode ? (tutor.language || "auto") : null,
+      anims: availableAnimations.length,
     });
 
     const result = await callWithFallback({
@@ -649,13 +676,17 @@ export function createApiApp() {
     const tutor = req.body?.tutor && typeof req.body.tutor === "object"
       ? { mode: Boolean(req.body.tutor.mode), language: req.body.tutor.language }
       : null;
+    // FASE 8.5 · Animaciones disponibles enviadas por el cliente
+    const availableAnimations = Array.isArray(req.body?.availableAnimations)
+      ? req.body.availableAnimations
+      : [];
     const academicHint = [
       "MODO ANALISTA ACADÉMICO: el usuario te ha pasado material de estudio (PDF, código, imagen, audio, etc.).",
       "Si hay matemáticas o problemas, RESUÉLVELOS PASO A PASO con explicación clara.",
       "Si es código, identifica qué hace, sugiere mejoras y advierte de bugs.",
       "Si es un PDF/texto, resume lo esencial y, si pide ejercicios, guíalo razonando.",
     ].join(" ");
-    const baseSystem = buildSystemPrompt(level, memory, context, cameraEmpathy, tutor);
+    const baseSystem = buildSystemPrompt(level, memory, context, cameraEmpathy, tutor, availableAnimations);
     const systemInstruction = `${baseSystem}\n\n${academicHint}`;
 
     let parts;

@@ -102,6 +102,37 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Preservado intacto**: `anchorCameraToHead(vrm)` (cámara al hueso `J_Bip_C_Head`), sistema de baile (`GESTURES`, `tickAutonomousAnimations`), análisis multimodal de SENATI (PDFs/fotos siguen forzando Gemini en `/analyze`).
 - **Service worker bumped to `hina-v8-1`**.
 
+## Phase 8.5 — Wander universal, generación de imágenes/documentos y conciencia animada (April 2026)
+
+Cuatro mejoras grandes para que Hina se sienta más viva y útil sin importar el modelo activo:
+
+1. **Wander universal (paseo autónomo)**
+   - Nuevo módulo en `public/script.js` (justo después de `tickGesture`).
+   - Genera de forma procedural clips `idle` y `walk` sobre los huesos humanoid del VRM activo (cualquier modelo: default, casual, sexy, pijama, custom). No depende de assets externos.
+   - Crossfade idle ↔ walk de 0.5 s en un `AnimationMixer` dedicado, separado del mixer de animaciones subidas (.vmd / .fbx) para que ambos sistemas no se pisen.
+   - Área segura de **2.5 m** desde el origen; al salir, gira hacia el centro automáticamente.
+   - Velocidad ~0.55 m/s. Pausas aleatorias de 1.8–4.8 s entre tramos.
+   - Botón `🚶 Pasear: ON/OFF` en `#tool-stack` (persiste en `localStorage` con clave `hina.wander.v1`).
+   - **Reset al cambiar modelo**: `resetWanderForNewVrm(vrm)` se llama en `loadOutfit` y en `loadCustomVrmFromFile` — limpia posición/rotación a (0,0,0) y reconfigura el mixer del wander.
+   - Convive con gestos, animaciones cargadas y poseguard; `tickWander` se suspende automáticamente cuando hay otra cosa controlando los huesos.
+
+2. **Generación de imágenes (Pollinations.ai, gratis y sin clave)**
+   - Detector `detectImageGenCommand` en `script.js` reconoce "dibújame…", "pinta una imagen de…", "genera una ilustración de…", "/img …".
+   - `runImageGeneration({prompt})` carga `https://image.pollinations.ai/prompt/<enc>?width=768&height=768&nologo=true` con un probe de 25 s y muestra la imagen embebida + botón **⬇️ Descargar**.
+
+3. **Generación de documentos descargables (.txt / .md)**
+   - Detector `detectDocGenCommand` reconoce "redáctame un documento de…", "escríbeme un markdown sobre…", "/doc md|txt …".
+   - `runDocGeneration({format, topic})` pide el contenido al cerebro actual (Gemini/Groq) y lo entrega como Blob descargable con preview de las primeras 500 letras.
+
+4. **Conciencia de animaciones guardadas (multi-modelo)**
+   - El cliente envía `availableAnimations: [...animRegistry.keys()]` en cada `/chat` y `/analyze`.
+   - El servidor (`buildAnimationsBlock` en `server.js`) inyecta un bloque "ANIMACIONES DISPONIBLES" en el system prompt para que Hina sepa exactamente qué clips puede sugerir y confirmar.
+   - `detectSavedAnimCommand` ampliado: reconoce "haz la posec", "muestra la kpop", "ejecuta la X", "ponme la X", además de los triggers anteriores. Coincidencia fuzzy parcial y por palabra completa dentro del texto.
+
+Bumps adicionales:
+- Service Worker: `hina-v8-4-1` → `hina-v8-5`.
+- `appendMessage` ahora acepta `opts.id` (lo usan los generadores de imagen/documento para reemplazar el mensaje "pensando").
+
 ## Phase 8.4 — Tutora políglota, animaciones externas y limpieza de memoria (April 2026)
 
 - **Modo Tutora Universal de Idiomas** (`server.js` `buildTutorBlock` + `script.js` botón `#tutor-toggle-btn`): NO solo inglés. El usuario cicla entre OFF / Auto / Japonés / Coreano / Inglés / Chino / Ruso / Alemán / Francés / Italiano / Portugués / Árabe con un click en el botón "🎓 Tutora". Estado persistido en `localStorage` (`hina.tutor.v1`). Cuando está activo, el cliente añade `tutor: { mode, language }` a `/chat` y `/analyze`; el servidor inyecta un bloque al `systemInstruction` que pide a Hina: (1) frase en idioma objetivo con escritura nativa (kanji/hangul/hanzi/cirílico/árabe), (2) transliteración o pronunciación, (3) traducción al español natural, (4) micro-nota cultural si aporta. La personalidad y el nivel de afecto se mantienen — Hina sigue siendo Hina, pero ahora también enseña.

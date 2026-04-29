@@ -1082,23 +1082,46 @@ async function playSavedAnimation(name) {
 
 // Detector de comando: "baila baile_kpop", "anima saludo_grande",
 // "/anim baile_kpop", "reproduce baile_kpop".
+// FASE 8.5 · Triggers ampliados — además de "baila X" / "anima X" / "/anim X"
+// reconocemos "haz la X", "muestra la X", "ponme la X", "ejecuta la X" para que
+// frases como "haz la PoseC" o "muestra Kpop" disparen la animación correcta
+// sin importar el modelo activo.
 const ANIM_TRIGGERS = [
-  /\b(?:baila|báilame|bailame|danza)\s+([\p{L}0-9_\- ]{2,40})/iu,
-  /\b(?:anima|reproduce|pon)\s+(?:la\s+animaci[oó]n\s+)?([\p{L}0-9_\- ]{2,40})/iu,
+  /\b(?:baila|b[aá]ilame|danza|bailar)\s+([\p{L}0-9_\- ]{2,40})/iu,
+  /\b(?:anima|animaci[oó]n|reproduce|pon|ponme|p[óo]n(?:te|me)?)\s+(?:la\s+animaci[oó]n\s+|la\s+|el\s+)?([\p{L}0-9_\- ]{2,40})/iu,
+  /\b(?:haz(?:me)?|hacer|ejecuta|muestra(?:me)?|ens[eé][ñn]ame)\s+(?:la\s+|el\s+|una\s+)?([\p{L}0-9_\- ]{2,40})/iu,
   /^\/anim(?:aci[oó]n)?\s+([\p{L}0-9_\- ]{2,40})/iu,
 ];
+
+// Lista pública de animaciones guardadas (la consume el cliente para enviarla
+// al servidor en el payload, así Hina sabe en tiempo real qué tiene Emanuel).
+function listSavedAnimNames() {
+  try { return Array.from(animRegistry.keys()); } catch { return []; }
+}
+
+function _normalizeAnimCandidate(s) {
+  return String(s || "").trim().toLowerCase().replace(/\s+/g, "_");
+}
+
 function detectSavedAnimCommand(text) {
   if (!text || animRegistry.size === 0) return null;
   for (const re of ANIM_TRIGGERS) {
     const m = re.exec(text);
     if (!m) continue;
-    const candidate = m[1].trim().toLowerCase().replace(/\s+/g, "_");
+    const candidate = _normalizeAnimCandidate(m[1]);
     if (!candidate) continue;
-    // Solo dispara si coincide con algo guardado (parcial cuenta).
     if (animRegistry.has(candidate)) return candidate;
     for (const k of animRegistry.keys()) {
       if (k.includes(candidate) || candidate.includes(k)) return k;
     }
+  }
+  // Último recurso: alguna animación guardada aparece como palabra completa
+  // dentro del texto (p. ej. "puedes mostrarme posec por favor").
+  const lower = text.toLowerCase();
+  for (const k of animRegistry.keys()) {
+    if (k.length < 3) continue;
+    const safe = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${safe}\\b`).test(lower)) return k;
   }
   return null;
 }
@@ -1514,6 +1537,8 @@ async function loadCustomVrmFromFile(file) {
         startPoseGuard(vrm, { intervalMs: 50, durationMs: 4000 });
         activateSpringBones(vrm);
         anchorCameraToHead(vrm);
+        // FASE 8.5 · Resetea posición/rotación + reconfigura wander para el VRM externo.
+        resetWanderForNewVrm(vrm);
         renderWardrobeButtons();
         if (info) info.textContent = `Hina lista (${file.name})`;
         hideLoadBar(500);
@@ -1737,6 +1762,11 @@ function loadOutfit(name, opts = {}) {
         // ancla la cámara al hueso de la cabeza (J_Bip_C_Head)
         anchorCameraToHead(vrm);
 
+        // FASE 8.5 · Resetea posición/rotación a (0,0,0) y reconfigura el
+        // motor de Wander para el nuevo modelo (evita que aparezca fuera de
+        // cámara o conserve la posición que dejó el modelo anterior).
+        resetWanderForNewVrm(vrm);
+
         renderWardrobeButtons();
         if (info) info.textContent = `Hina lista (${def.label})`;
         hideLoadBar(500);
@@ -1866,6 +1896,17 @@ const tutorToggleBtn = document.getElementById("tutor-toggle-btn");
 if (tutorToggleBtn) {
   tutorToggleBtn.addEventListener("click", () => cycleTutor());
   refreshTutorToggleUi();
+}
+
+// FASE 8.5 · BOTÓN WANDER (paseo autónomo)
+const wanderToggleBtn = document.getElementById("wander-toggle-btn");
+if (wanderToggleBtn) {
+  wanderToggleBtn.addEventListener("click", () => setWanderEnabled(!wanderEnabled));
+  refreshWanderUi();
+  // Si quedó activado en una sesión previa y ya hay modelo cargado, arranca.
+  if (wanderEnabled && currentVrm) {
+    setupWanderForVrm(currentVrm);
+  }
 }
 
 // FASE 8.2 · BOTÓN CARGAR TEXTURA EXTERNA
@@ -2274,6 +2315,331 @@ function tickGesture() {
 }
 
 // =============================================================================
+// FASE 8.5 · MOTOR DE WANDER UNIVERSAL (caminar autónomo + crossfade)
+// =============================================================================
+//
+// Cualquier modelo VRM cargado (default, casual, sexy, pijama, custom, etc.)
+// puede pasear por un área segura de 2.5 m con clips procedurales generados a
+// partir de su propio rig humanoide. Idle ↔ Walk se mezclan con un crossfade
+// de 0.5 s en un AnimationMixer dedicado, separado del mixer de animaciones
+// subidas (.vmd / .fbx) para que ambos sistemas no se pisen.
+
+const WANDER_STORAGE_KEY = "hina.wander.v1";
+const WANDER_SAFE_RADIUS = 2.5;       // metros desde el origen (escenario)
+const WANDER_SPEED = 0.55;            // m/s (paso humano relajado)
+const WANDER_CROSSFADE_S = 0.5;
+const WANDER_ARRIVE_DIST = 0.18;      // m
+
+let wanderEnabled = false;
+const wanderState = {
+  mixer: null,
+  vrm: null,
+  idleAction: null,
+  walkAction: null,
+  mode: "idle",                       // "idle" | "walk"
+  target: new THREE.Vector3(),
+  pauseUntil: 0,
+};
+
+try {
+  wanderEnabled = localStorage.getItem(WANDER_STORAGE_KEY) === "1";
+} catch {}
+
+function _quaternionAroundAxis(axis, angle) {
+  return new THREE.Quaternion().setFromAxisAngle(axis, angle);
+}
+
+// Construye un clip de respiración mínima (idle) sobre el rig actual. No
+// depende del modelo: usa los huesos humanoid normalizados del propio VRM.
+function buildIdleClipForVrm(vrm) {
+  if (!vrm?.humanoid) return null;
+  const tracks = [];
+  const spine = vrm.humanoid.getRawBoneNode("spine");
+  if (spine) {
+    const q0 = spine.quaternion.clone();
+    const qUp = q0.clone().multiply(_quaternionAroundAxis(new THREE.Vector3(1, 0, 0), 0.025));
+    const qDn = q0.clone().multiply(_quaternionAroundAxis(new THREE.Vector3(1, 0, 0), -0.005));
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${spine.name}.quaternion`,
+      [0, 1.2, 2.4],
+      [
+        q0.x, q0.y, q0.z, q0.w,
+        qUp.x, qUp.y, qUp.z, qUp.w,
+        q0.x, q0.y, q0.z, q0.w,
+      ],
+    ));
+    void qDn; // reservado para futuras micro-respiraciones
+  }
+  if (!tracks.length) {
+    // fallback: clip vacío de 1 s — necesario para que el AnimationMixer corra
+    return new THREE.AnimationClip("hina_idle", 1, []);
+  }
+  return new THREE.AnimationClip("hina_idle", 2.4, tracks);
+}
+
+// Construye un clip de caminar de 1 s en bucle. Mueve piernas y brazos en
+// oposición, con un pequeño rebote en la cadera. Se reconstruye por modelo.
+function buildWalkClipForVrm(vrm) {
+  if (!vrm?.humanoid) return null;
+  const tracks = [];
+  const X = new THREE.Vector3(1, 0, 0);
+  const Z = new THREE.Vector3(0, 0, 1);
+
+  function addBoneSwing(boneName, axis, magnitude, phaseOffset = 0) {
+    const bone = vrm.humanoid.getRawBoneNode(boneName);
+    if (!bone) return;
+    const q0 = bone.quaternion.clone();
+    const qPos = q0.clone().multiply(_quaternionAroundAxis(axis, magnitude));
+    const qNeg = q0.clone().multiply(_quaternionAroundAxis(axis, -magnitude));
+    // 4 keyframes: 0=fwd, 0.5=back, 1=fwd → loop continuo
+    let kfPos = qPos, kfMid = q0, kfNeg = qNeg;
+    if (phaseOffset === 0.5) { kfPos = qNeg; kfNeg = qPos; }
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${bone.name}.quaternion`,
+      [0, 0.5, 1],
+      [
+        kfPos.x, kfPos.y, kfPos.z, kfPos.w,
+        kfNeg.x, kfNeg.y, kfNeg.z, kfNeg.w,
+        kfPos.x, kfPos.y, kfPos.z, kfPos.w,
+      ],
+    ));
+    void kfMid;
+  }
+
+  // Piernas (alternadas)
+  addBoneSwing("leftUpperLeg", X, 0.55, 0);
+  addBoneSwing("rightUpperLeg", X, 0.55, 0.5);
+  // Rodilla (siempre flexión positiva al pisar)
+  const lLow = vrm.humanoid.getRawBoneNode("leftLowerLeg");
+  const rLow = vrm.humanoid.getRawBoneNode("rightLowerLeg");
+  if (lLow) {
+    const q0 = lLow.quaternion.clone();
+    const qBend = q0.clone().multiply(_quaternionAroundAxis(X, -0.4));
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${lLow.name}.quaternion`, [0, 0.25, 0.5, 0.75, 1], [
+      q0.x, q0.y, q0.z, q0.w,
+      q0.x, q0.y, q0.z, q0.w,
+      qBend.x, qBend.y, qBend.z, qBend.w,
+      q0.x, q0.y, q0.z, q0.w,
+      q0.x, q0.y, q0.z, q0.w,
+    ]));
+  }
+  if (rLow) {
+    const q0 = rLow.quaternion.clone();
+    const qBend = q0.clone().multiply(_quaternionAroundAxis(X, -0.4));
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${rLow.name}.quaternion`, [0, 0.25, 0.5, 0.75, 1], [
+      qBend.x, qBend.y, qBend.z, qBend.w,
+      q0.x, q0.y, q0.z, q0.w,
+      q0.x, q0.y, q0.z, q0.w,
+      q0.x, q0.y, q0.z, q0.w,
+      qBend.x, qBend.y, qBend.z, qBend.w,
+    ]));
+  }
+  // Brazos (en contrafase con la pierna del mismo lado)
+  addBoneSwing("leftUpperArm", X, 0.32, 0.5);
+  addBoneSwing("rightUpperArm", X, 0.32, 0);
+  // Antebrazos: flexión leve constante (codos relajados)
+  const lFA = vrm.humanoid.getRawBoneNode("leftLowerArm");
+  const rFA = vrm.humanoid.getRawBoneNode("rightLowerArm");
+  for (const fa of [lFA, rFA]) {
+    if (!fa) continue;
+    const q0 = fa.quaternion.clone();
+    const qBend = q0.clone().multiply(_quaternionAroundAxis(Z, -0.25));
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${fa.name}.quaternion`, [0, 1], [
+      qBend.x, qBend.y, qBend.z, qBend.w,
+      qBend.x, qBend.y, qBend.z, qBend.w,
+    ]));
+  }
+  // Cadera: pequeño rebote vertical cada paso
+  const hips = vrm.humanoid.getRawBoneNode("hips");
+  if (hips) {
+    const baseY = hips.position.y;
+    const baseX = hips.position.x;
+    const baseZ = hips.position.z;
+    tracks.push(new THREE.VectorKeyframeTrack(`${hips.name}.position`, [0, 0.25, 0.5, 0.75, 1], [
+      baseX, baseY, baseZ,
+      baseX, baseY + 0.018, baseZ,
+      baseX, baseY, baseZ,
+      baseX, baseY + 0.018, baseZ,
+      baseX, baseY, baseZ,
+    ]));
+  }
+  return new THREE.AnimationClip("hina_walk", 1, tracks);
+}
+
+function disposeWanderMixer() {
+  if (!wanderState.mixer) return;
+  try {
+    wanderState.mixer.stopAllAction();
+    if (wanderState.vrm?.scene) wanderState.mixer.uncacheRoot(wanderState.vrm.scene);
+  } catch (err) {
+    console.warn("[wander] dispose mixer:", err);
+  }
+  wanderState.mixer = null;
+  wanderState.vrm = null;
+  wanderState.idleAction = null;
+  wanderState.walkAction = null;
+  wanderState.mode = "idle";
+  wanderState.pauseUntil = 0;
+}
+
+function setupWanderForVrm(vrm) {
+  if (!vrm) return false;
+  disposeWanderMixer();
+  try {
+    const mixer = new THREE.AnimationMixer(vrm.scene);
+    const idleClip = buildIdleClipForVrm(vrm);
+    const walkClip = buildWalkClipForVrm(vrm);
+    if (!idleClip || !walkClip) {
+      console.warn("[wander] no se pudieron construir los clips para este modelo");
+      return false;
+    }
+    const idleAction = mixer.clipAction(idleClip);
+    idleAction.setLoop(THREE.LoopRepeat, Infinity);
+    idleAction.weight = 1;
+    idleAction.play();
+    const walkAction = mixer.clipAction(walkClip);
+    walkAction.setLoop(THREE.LoopRepeat, Infinity);
+    walkAction.weight = 0;
+    walkAction.play();
+    wanderState.mixer = mixer;
+    wanderState.vrm = vrm;
+    wanderState.idleAction = idleAction;
+    wanderState.walkAction = walkAction;
+    wanderState.mode = "idle";
+    wanderState.pauseUntil = performance.now() + 1500 + Math.random() * 2000;
+    return true;
+  } catch (err) {
+    console.warn("[wander] setup falló:", err);
+    disposeWanderMixer();
+    return false;
+  }
+}
+
+function _wanderPickTarget() {
+  const r = (0.4 + Math.random() * 0.55) * WANDER_SAFE_RADIUS;
+  const theta = Math.random() * Math.PI * 2;
+  wanderState.target.set(Math.cos(theta) * r, 0, Math.sin(theta) * r);
+}
+
+function _wanderCrossfade(toWalk) {
+  if (!wanderState.idleAction || !wanderState.walkAction) return;
+  const target = toWalk ? "walk" : "idle";
+  if (wanderState.mode === target) return;
+  wanderState.mode = target;
+  try {
+    if (toWalk) {
+      wanderState.walkAction.reset();
+      wanderState.walkAction.enabled = true;
+      wanderState.idleAction.crossFadeTo(wanderState.walkAction, WANDER_CROSSFADE_S, false);
+    } else {
+      wanderState.idleAction.reset();
+      wanderState.idleAction.enabled = true;
+      wanderState.walkAction.crossFadeTo(wanderState.idleAction, WANDER_CROSSFADE_S, false);
+    }
+  } catch (err) {
+    console.warn("[wander] crossfade:", err);
+  }
+}
+
+function tickWander(delta) {
+  if (!wanderEnabled) return;
+  if (!wanderState.mixer || !wanderState.vrm) return;
+  if (wanderState.vrm !== currentVrm) return;
+  // Si hay otra animación tomando control de los huesos, suspendemos wander
+  // para no pisar gestos / clips subidos / cargas en curso.
+  if (customAnimPlaying || activeGesture || isOutfitLoading) return;
+
+  // El mixer global de wander avanza cada frame
+  try { wanderState.mixer.update(delta); } catch (err) {
+    console.warn("[wander] mixer update:", err);
+    return;
+  }
+
+  const sceneObj = wanderState.vrm.scene;
+  const pos = sceneObj.position;
+  const now = performance.now();
+
+  // Límite del escenario: 2.5 m. Si se sale, gira 180° hacia el centro.
+  const distFromOrigin = Math.hypot(pos.x, pos.z);
+  if (distFromOrigin > WANDER_SAFE_RADIUS) {
+    sceneObj.rotation.y = Math.atan2(-pos.x, -pos.z);
+    wanderState.target.set(0, 0, 0);
+    wanderState.pauseUntil = 0;
+    _wanderCrossfade(true);
+  }
+
+  if (wanderState.mode === "idle") {
+    if (now >= wanderState.pauseUntil) {
+      _wanderPickTarget();
+      _wanderCrossfade(true);
+    }
+    return;
+  }
+
+  // Modo walk: avanza hacia el target
+  const dx = wanderState.target.x - pos.x;
+  const dz = wanderState.target.z - pos.z;
+  const distToTarget = Math.hypot(dx, dz);
+  if (distToTarget < WANDER_ARRIVE_DIST) {
+    _wanderCrossfade(false);
+    wanderState.pauseUntil = now + 1800 + Math.random() * 3000;
+    return;
+  }
+  // Rotación suave hacia el target
+  const desiredAngle = Math.atan2(dx, dz);
+  let diff = desiredAngle - sceneObj.rotation.y;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  sceneObj.rotation.y += diff * Math.min(1, delta * 4);
+  // Avanza en la dirección actual
+  const stepX = Math.sin(sceneObj.rotation.y) * WANDER_SPEED * delta;
+  const stepZ = Math.cos(sceneObj.rotation.y) * WANDER_SPEED * delta;
+  pos.x += stepX;
+  pos.z += stepZ;
+}
+
+// FASE 8.5 · Reseteo total al cambiar de modelo: posición, rotación, mixer.
+// Se llama desde loadOutfit y loadCustomVrmFromFile justo después de añadir
+// el nuevo VRM a la escena.
+function resetWanderForNewVrm(newVrm) {
+  if (!newVrm) return;
+  try {
+    newVrm.scene.position.set(0, 0, 0);
+    newVrm.scene.rotation.set(0, 0, 0);
+  } catch {}
+  disposeWanderMixer();
+  if (wanderEnabled) {
+    setupWanderForVrm(newVrm);
+  }
+}
+
+function setWanderEnabled(on) {
+  wanderEnabled = !!on;
+  try { localStorage.setItem(WANDER_STORAGE_KEY, wanderEnabled ? "1" : "0"); } catch {}
+  refreshWanderUi();
+  if (wanderEnabled && currentVrm) {
+    setupWanderForVrm(currentVrm);
+  } else if (!wanderEnabled) {
+    _wanderCrossfade(false);
+    // dejamos al modelo en su sitio, no lo teletransportamos
+  }
+}
+
+function refreshWanderUi() {
+  const btn = document.getElementById("wander-toggle-btn");
+  if (!btn) return;
+  if (wanderEnabled) {
+    btn.classList.add("active");
+    btn.textContent = "🚶 Pasear: ON";
+    btn.title = "Hina pasea sola (área de 2.5 m). Click para detener.";
+  } else {
+    btn.classList.remove("active");
+    btn.textContent = "🚶 Pasear: OFF";
+    btn.title = "Activa el paseo autónomo: Hina caminará por el escenario.";
+  }
+}
+
+// =============================================================================
 // CHAT UI
 // =============================================================================
 
@@ -2289,6 +2655,9 @@ function appendMessage(text, sender, opts = {}) {
   }
   const msg = document.createElement("div");
   msg.className = `chat-message ${sender}`;
+  // FASE 8.5 · soporte opcional de id (lo usan los generadores img/doc para
+  // poder reemplazar el mensaje "pensando" con el resultado).
+  if (opts && typeof opts.id === "string" && opts.id) msg.id = opts.id;
 
   if (sender === "bot") {
     const textEl = document.createElement("span");
@@ -3307,6 +3676,8 @@ async function askGemini(userText) {
     memory: distilledMemoryForServer(),
     context: buildLocalContext(),
     tutor: tutorPayloadForServer(),
+    // FASE 8.5 · enviamos las animaciones guardadas para que Hina las conozca
+    availableAnimations: listSavedAnimNames(),
   };
   try {
     return await postChatOnce(payload);
@@ -3331,6 +3702,8 @@ async function analyzeWithFiles(userText, attachments) {
     context: buildLocalContext(),
     cameraEmpathy,
     tutor: tutorPayloadForServer(),
+    // FASE 8.5 · también enviamos las animaciones guardadas en el modo análisis
+    availableAnimations: listSavedAnimNames(),
     files: attachments.map((a) => ({
       name: a.name,
       mime: a.mime,
@@ -3397,6 +3770,167 @@ async function requestSummary() {
 // FLUJO PRINCIPAL DE MENSAJES
 // =============================================================================
 
+// =============================================================================
+// FASE 8.5 · GENERACIÓN DE IMÁGENES (Pollinations.ai) y DOCUMENTOS (.txt/.md)
+// =============================================================================
+//
+// Pollinations es 100 % gratis y NO requiere clave: simplemente pedimos
+// `https://image.pollinations.ai/prompt/<prompt-codificado>?width=...&nologo=true`
+// y devuelve una imagen PNG. La mostramos en el chat con un botón de descarga.
+// Para documentos, generamos el contenido con Hina (Gemini/Groq) y lo servimos
+// como Blob descargable .txt o .md según el formato pedido.
+
+const IMG_GEN_TRIGGERS = [
+  /\b(?:dibuja(?:me)?|p[ií]ntame|p[ií]nta|crea|gen[eé]rame|gen[eé]rame?|gen[eé]ra(?:me)?|hazme|haz)\s+(?:una\s+|un\s+)?(?:imagen|foto|ilustraci[oó]n|dibujo|render|cuadro|poster|p[oó]ster)\s+(?:de|del|sobre|que muestre|con)\s+([\s\S]{3,200})/iu,
+  /\b(?:imagen|foto|ilustraci[oó]n|dibujo|render)\s+(?:de|del|sobre|que muestre|con)\s+([\s\S]{3,200})/iu,
+  /^\/img(?:agen)?\s+([\s\S]{3,200})/iu,
+];
+
+function detectImageGenCommand(text) {
+  if (!text) return null;
+  for (const re of IMG_GEN_TRIGGERS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const prompt = String(m[1] || "").trim().replace(/[.\?!]+$/, "");
+    if (prompt.length >= 3) return { prompt };
+  }
+  return null;
+}
+
+async function runImageGeneration({ prompt }) {
+  const thinkingId = `img-${Date.now()}`;
+  appendMessage(`(*Hina pinta para ti: "${prompt}"…*)`, "system", { id: thinkingId });
+  try {
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=768&nologo=true&seed=${Math.floor(Math.random() * 1e6)}`;
+    // Verificamos cargando la imagen antes de mostrarla, para detectar fallos.
+    await new Promise((resolve, reject) => {
+      const probe = new Image();
+      probe.crossOrigin = "anonymous";
+      probe.onload = () => resolve();
+      probe.onerror = () => reject(new Error("Pollinations no respondió"));
+      probe.src = url;
+      // timeout 25 s
+      setTimeout(() => reject(new Error("timeout")), 25000);
+    });
+    // Reemplazamos el "pensando" por la imagen + descarga
+    const node = document.getElementById(thinkingId);
+    if (node) node.remove();
+    const safeName = prompt.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "hina_imagen";
+    const html = `
+      <div class="hina-genimg">
+        <figure>
+          <img src="${url}" alt="${prompt.replace(/"/g, "&quot;")}" loading="lazy" />
+          <figcaption>${prompt}</figcaption>
+        </figure>
+        <a class="hina-genimg-download" href="${url}" download="${safeName}.png" target="_blank" rel="noopener">⬇️ Descargar</a>
+      </div>`;
+    appendMessageHtml(`Aquí tienes lo que pinté: <em>${prompt}</em>`, "bot", { html });
+    const reply = `Listo, te dibujé "${prompt}". Si quieres otra versión, pídemela 💕`;
+    pushHistory("model", reply);
+    speakResponse(reply);
+  } catch (err) {
+    console.warn("[img-gen] falló", err);
+    const node = document.getElementById(thinkingId);
+    if (node) node.remove();
+    const fallback = "No pude generar la imagen ahora mismo (Pollinations no respondió). ¿Probamos otra descripción más simple?";
+    appendMessage(fallback, "bot");
+    pushHistory("model", fallback);
+    speakResponse(fallback);
+  }
+}
+
+// Documentos (.txt / .md) — el contenido lo genera el cerebro actual.
+const DOC_GEN_TRIGGERS = [
+  /\b(?:gen[eé]rame|gen[eé]ra(?:me)?|cr[eé]a(?:me)?|hazme|escr[ií]beme?|escribe(?:me)?|red[aá]ctame?)\s+(?:un\s+|una\s+)?(archivo|documento|texto|markdown|md|nota|apuntes?|gu[ií]a|tutorial|resumen|ensayo|carta|poema|cuento|informe|reporte)\s+([\s\S]{3,300})/iu,
+  /^\/doc(?:umento)?\s+(txt|md)\s+([\s\S]{3,300})/iu,
+];
+
+function detectDocGenCommand(text) {
+  if (!text) return null;
+  // /doc md|txt <tema>
+  const slashMatch = /^\/doc(?:umento)?\s+(txt|md)\s+([\s\S]{3,300})/iu.exec(text);
+  if (slashMatch) {
+    return { format: slashMatch[1].toLowerCase(), topic: slashMatch[2].trim() };
+  }
+  for (const re of DOC_GEN_TRIGGERS) {
+    const m = re.exec(text);
+    if (!m) continue;
+    const kind = String(m[1] || "").toLowerCase();
+    const topic = String(m[2] || "").trim().replace(/[.\?!]+$/, "");
+    if (topic.length < 3) continue;
+    const format = /(markdown|md|gu[ií]a|tutorial|apuntes?|informe|reporte|ensayo)/i.test(kind) ? "md" : "txt";
+    return { format, topic };
+  }
+  return null;
+}
+
+async function runDocGeneration({ format, topic }) {
+  const thinkingId = `doc-${Date.now()}`;
+  appendMessage(`(*Hina redacta tu ${format.toUpperCase()}: "${topic}"…*)`, "system", { id: thinkingId });
+  const fmtLabel = format === "md" ? "Markdown" : "texto plano";
+  const docPrompt = format === "md"
+    ? `Escribe un documento en MARKDOWN bien estructurado sobre: "${topic}". Usa títulos (##), subtítulos (###), listas y, si aplica, bloques de código. Sé claro, completo y útil. Devuelve SOLO el markdown, sin meta-comentarios ni envoltorios.`
+    : `Escribe un documento en TEXTO PLANO claro y útil sobre: "${topic}". Sin markdown, sin asteriscos. Devuelve SOLO el contenido del documento.`;
+  try {
+    const content = await askGemini(docPrompt);
+    const node = document.getElementById(thinkingId);
+    if (node) node.remove();
+    const safeName = topic.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "documento_hina";
+    const fullName = `${safeName}.${format}`;
+    const blob = new Blob([content], {
+      type: format === "md" ? "text/markdown;charset=utf-8" : "text/plain;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const previewText = content.length > 500 ? content.slice(0, 500) + "…" : content;
+    const html = `
+      <div class="hina-gendoc">
+        <div class="hina-gendoc-meta">📄 <strong>${fullName}</strong> · ${fmtLabel}</div>
+        <pre class="hina-gendoc-preview">${escapeHtmlSafe(previewText)}</pre>
+        <a class="hina-gendoc-download" href="${url}" download="${fullName}">⬇️ Descargar ${fullName}</a>
+      </div>`;
+    appendMessageHtml(`Te preparé un ${fmtLabel.toLowerCase()} sobre <em>${topic}</em>:`, "bot", { html });
+    const reply = `Listo, tienes tu ${fullName} para descargar 💕`;
+    pushHistory("model", reply);
+    speakResponse(reply);
+    // Liberamos la URL después de 5 minutos (el botón de descarga ya cargó al DOM)
+    setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+  } catch (err) {
+    console.warn("[doc-gen] falló", err);
+    const node = document.getElementById(thinkingId);
+    if (node) node.remove();
+    const fallback = "No pude redactar el documento ahora. ¿Lo intentamos con un tema más concreto?";
+    appendMessage(fallback, "bot");
+    pushHistory("model", fallback);
+    speakResponse(fallback);
+  }
+}
+
+// Helper local: si appendMessageHtml o escapeHtmlSafe no existen ya, los
+// definimos aquí de manera mínima y compatible con appendMessage existente.
+if (typeof escapeHtmlSafe !== "function") {
+  // eslint-disable-next-line no-var
+  var escapeHtmlSafe = function (s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  };
+}
+if (typeof appendMessageHtml !== "function") {
+  // eslint-disable-next-line no-var
+  var appendMessageHtml = function (text, who, opts = {}) {
+    appendMessage(text, who);
+    if (!opts.html || !chatLog) return;
+    const wrap = document.createElement("div");
+    wrap.className = `chat-msg ${who} hina-rich`;
+    wrap.innerHTML = opts.html;
+    chatLog.appendChild(wrap);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  };
+}
+
 async function handleUserMessage(text) {
   const trimmed = text.trim();
   if (!trimmed && pendingAttachments.length === 0) return;
@@ -3408,6 +3942,26 @@ async function handleUserMessage(text) {
   primeSpeech();
   if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
   stopLipSync();
+
+  // FASE 8.5 · GENERACIÓN DE IMÁGENES (Pollinations) — 100 % gratis, sin clave
+  const imgIntent = detectImageGenCommand(trimmed);
+  if (imgIntent && pendingAttachments.length === 0) {
+    appendMessage(trimmed, "user");
+    chatInput.value = "";
+    pushHistory("user", trimmed);
+    await runImageGeneration(imgIntent);
+    return;
+  }
+
+  // FASE 8.5 · GENERACIÓN DE DOCUMENTOS (.txt / .md descargables)
+  const docIntent = detectDocGenCommand(trimmed);
+  if (docIntent && pendingAttachments.length === 0) {
+    appendMessage(trimmed, "user");
+    chatInput.value = "";
+    pushHistory("user", trimmed);
+    await runDocGeneration(docIntent);
+    return;
+  }
 
   // FASE 6 · /musica — totalmente local, no toca a Gemini
   const music = detectMusicCommand(trimmed);
@@ -4060,6 +4614,10 @@ function animate() {
 
       // Los gestos procedurales sólo se ejecutan si el mixer NO está activo.
       if (!customAnimPlaying) tickGesture();
+
+      // FASE 8.5 · Motor de Wander universal — sólo si no hay animación
+      // externa, gesto activo o carga en curso (tickWander ya lo verifica).
+      tickWander(delta);
 
       currentVrm.update(delta);
     }
