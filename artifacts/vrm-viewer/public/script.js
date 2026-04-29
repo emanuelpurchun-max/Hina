@@ -465,23 +465,52 @@ function createRendererSafe() {
   }
 }
 
-const renderer = createRendererSafe();
+// FASE 8.5.1 · Si WebGL no está disponible, NO matamos el módulo entero.
+// Antes hacíamos `throw` y eso impedía que se registraran los handlers del
+// formulario de login (al final del archivo). Resultado: el usuario veía la
+// caja "Acceso Privado", escribía la frase clave, pulsaba "Entrar"… y NADA
+// pasaba, porque el listener nunca se había registrado.
+//
+// Solución: dejar un stub no-op de renderer (con un canvas falso para que
+// OrbitControls y los listeners no truenen) y mostrar el aviso visual. Así el
+// resto del script (login, chat, IA, herramientas) sigue funcionando aunque
+// no se vea el modelo 3D.
+let renderer = createRendererSafe();
+let webglAvailable = !!renderer;
 if (!renderer) {
-  // muestra un mensaje claro al usuario en lugar de quedar en negro;
-  // el chat y el resto de la UI siguen funcionando.
   const banner = document.createElement("div");
+  banner.id = "webgl-fallback-banner";
   banner.style.cssText =
-    "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);" +
-    "max-width:340px;padding:18px;border-radius:12px;z-index:9999;" +
-    "background:rgba(20,20,35,.95);color:#fff;border:1px solid rgba(255,255,255,.18);" +
-    "font:13px/1.4 system-ui;text-align:center;backdrop-filter:blur(10px);";
+    "position:fixed;top:18px;left:50%;transform:translateX(-50%);" +
+    "max-width:340px;padding:14px 16px;border-radius:12px;z-index:50;" +
+    "background:rgba(20,20,35,.92);color:#fff;border:1px solid rgba(255,255,255,.18);" +
+    "font:12px/1.4 system-ui;text-align:center;backdrop-filter:blur(10px);" +
+    "pointer-events:none;";
   banner.innerHTML =
-    "<b>WebGL no disponible</b><br><br>" +
-    "Tu navegador no pudo crear el contexto 3D para mostrar a Hina. " +
-    "Cierra otras pestañas pesadas, desactiva el modo ahorro de datos " +
-    "y vuelve a entrar.<br><br>El chat sigue funcionando.";
+    "<b>WebGL no disponible</b><br>" +
+    "No pude crear el contexto 3D para mostrar el modelo, " +
+    "pero <b>el chat con Hina sí funciona</b>. " +
+    "Cierra otras pestañas pesadas o desactiva el ahorro de datos.";
   document.body.appendChild(banner);
-  throw new Error("WebGL context creation failed");
+  console.warn("[renderer] usando stub no-op; el visor 3D estará vacío pero el chat sigue activo.");
+  // Stub mínimo: cumple la interfaz que el resto del módulo espera. Cualquier
+  // llamada a métodos render-dependientes simplemente no hace nada.
+  const fakeCanvas = document.createElement("canvas");
+  fakeCanvas.width = 1;
+  fakeCanvas.height = 1;
+  fakeCanvas.style.display = "none";
+  renderer = {
+    domElement: fakeCanvas,
+    outputColorSpace: 0,
+    info: { memory: { geometries: 0, textures: 0 }, render: { calls: 0, triangles: 0 } },
+    setPixelRatio() {},
+    setSize() {},
+    setClearColor() {},
+    render() {},
+    dispose() {},
+    getContext() { return null; },
+    forceContextLoss() {},
+  };
 }
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
