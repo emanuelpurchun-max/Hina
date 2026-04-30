@@ -2118,6 +2118,61 @@ if (keysSave) {
   });
 }
 
+// =============================================================================
+// BOTÓN DE RESET TOTAL — borra service worker + caches + localStorage y
+// recarga la app desde cero. Útil cuando una versión vieja del SW se queda
+// pegada en el móvil sirviendo código obsoleto (script.js, .vrm, etc.).
+// =============================================================================
+const resetAppBtn = document.getElementById("reset-app-btn");
+if (resetAppBtn) {
+  resetAppBtn.addEventListener("click", async () => {
+    const ok = window.confirm(
+      "¿Resetear la app?\n\nEsto borrará el caché, el service worker y la sesión local " +
+        "(modelo activo, frase clave, claves de API en runtime). Tus claves guardadas como " +
+        "Secret en el servidor NO se tocan. La app se recargará al terminar.",
+    );
+    if (!ok) return;
+    resetAppBtn.disabled = true;
+    resetAppBtn.textContent = "🔄 Reseteando…";
+    try {
+      // 1) desregistra TODOS los service workers de este origen
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister().catch(() => {})));
+      }
+      // 2) borra TODAS las cachés del Cache Storage (precache, runtime, etc.)
+      if (typeof caches !== "undefined") {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k).catch(() => {})));
+      }
+      // 3) limpia almacenamiento local del navegador
+      try { localStorage.clear(); } catch {}
+      try { sessionStorage.clear(); } catch {}
+      // 4) intenta limpiar IndexedDB (donde guardamos animaciones .vmd / .fbx)
+      if (typeof indexedDB !== "undefined" && indexedDB.databases) {
+        try {
+          const dbs = await indexedDB.databases();
+          await Promise.all(
+            (dbs || []).map(
+              (db) =>
+                new Promise((resolve) => {
+                  if (!db?.name) return resolve();
+                  const req = indexedDB.deleteDatabase(db.name);
+                  req.onsuccess = req.onerror = req.onblocked = () => resolve();
+                }),
+            ),
+          );
+        } catch {}
+      }
+    } catch (err) {
+      console.warn("[reset] error parcial:", err);
+    } finally {
+      // 5) recarga forzada (sin caché HTTP)
+      window.location.reload();
+    }
+  });
+}
+
 const wardrobeOverlay = document.getElementById("wardrobe-overlay");
 function renderWardrobeButtons() {
   if (!wardrobeOverlay) return;
