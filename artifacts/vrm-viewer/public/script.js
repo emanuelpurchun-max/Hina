@@ -583,6 +583,9 @@ function updateLookAtTargetFromPointer(clientX, clientY) {
   const y = -(clientY / window.innerHeight) * 2 + 1;
   const headHeight = currentVrm ? controls.target.y : 1.45;
   lookAtTarget.position.set(x * 1.5, headHeight + y * 0.8, 2);
+  // Cualquier toque/movimiento del puntero "despierta" la mirada y suspende
+  // el sistema de mirada autónoma durante unos segundos.
+  pointerActiveUntil = performance.now() + 4000;
 }
 
 window.addEventListener("mousemove", (event) => {
@@ -599,6 +602,48 @@ window.addEventListener(
   },
   { passive: true },
 );
+
+// =============================================================================
+// MIRADA AUTÓNOMA · cuando el puntero está quieto, Hina mira a izquierda /
+// derecha / arriba / centro de forma natural, con suavizado tipo lerp para
+// que los ojos no "salten" entre posiciones. Las pupilas siguen al objetivo
+// global del lookAt del VRM.
+// =============================================================================
+let pointerActiveUntil = 0;
+let nextGazeShiftAt = performance.now() + 2500;
+const gazeTargetVec = { x: 0, y: 1.45, z: 2 };
+const GAZE_DIRECTIONS = [
+  { x: 0.0, y: 0.0 },     // centro
+  { x: -1.1, y: 0.05 },   // izquierda
+  { x: 1.1, y: 0.05 },    // derecha
+  { x: -0.6, y: 0.35 },   // arriba-izquierda
+  { x: 0.6, y: 0.35 },    // arriba-derecha
+  { x: 0.0, y: 0.4 },     // arriba
+  { x: -0.4, y: -0.2 },   // abajo-izquierda
+  { x: 0.4, y: -0.2 },    // abajo-derecha
+];
+
+function pickAutonomousGazeTarget() {
+  const dir = GAZE_DIRECTIONS[Math.floor(Math.random() * GAZE_DIRECTIONS.length)];
+  const headHeight = currentVrm ? controls.target.y : 1.45;
+  gazeTargetVec.x = dir.x;
+  gazeTargetVec.y = headHeight + dir.y;
+  gazeTargetVec.z = 2;
+}
+
+function tickAutonomousGaze(now) {
+  // Si el usuario está moviendo el puntero, no interferimos.
+  if (now < pointerActiveUntil) return;
+  if (now >= nextGazeShiftAt) {
+    pickAutonomousGazeTarget();
+    // Próximo desplazamiento entre 2 y 5 segundos: ritmo natural humano.
+    nextGazeShiftAt = now + 2000 + Math.random() * 3000;
+  }
+  // Suavizado lerp para que los ojos se deslicen, no salten.
+  lookAtTarget.position.x += (gazeTargetVec.x - lookAtTarget.position.x) * 0.06;
+  lookAtTarget.position.y += (gazeTargetVec.y - lookAtTarget.position.y) * 0.06;
+  lookAtTarget.position.z += (gazeTargetVec.z - lookAtTarget.position.z) * 0.06;
+}
 
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
@@ -1811,7 +1856,16 @@ function loadOutfit(name, opts = {}) {
       },
       (error) => {
         console.error("[wardrobe] error cargando", def.path, error);
+        const reason = error?.message || error?.toString?.() || "desconocido";
         if (info) info.textContent = `Error al cargar ${def.label}`;
+        // Mensaje visible al usuario en el chat para que sepa qué falló
+        // (antes los errores de Maid/Cosplay se quedaban sólo en consola).
+        try {
+          appendMessage(
+            `(*No pude cargar "${def.label}": ${reason}. Toca otra ropa para reintentar.*)`,
+            "system",
+          );
+        } catch {}
         hideLoadBar(1500);
         isOutfitLoading = false;
         resolve(false);
@@ -2719,6 +2773,11 @@ function appendMessage(text, sender, opts = {}) {
       if (current) speakResponse(current);
     });
     msg.appendChild(playBtn);
+
+    // Badge opcional con el cerebro que respondió (Gemini / Groq).
+    if (opts && typeof opts.brain === "string" && opts.brain) {
+      tagBubbleBrain(msg, opts.brain);
+    }
   } else if (sender === "system") {
     msg.textContent = text;
   } else {
@@ -2752,6 +2811,22 @@ function setBubbleText(bubble, text) {
   const textEl = bubble.querySelector(".bubble-text");
   if (textEl) textEl.textContent = text;
   else bubble.textContent = text;
+}
+
+// Etiqueta una burbuja de Hina con el cerebro que la generó (Gemini / Groq).
+// El badge se inserta una sola vez; si la burbuja ya tiene uno, se actualiza.
+function tagBubbleBrain(bubble, brain) {
+  if (!bubble || !brain) return;
+  const key = String(brain).toLowerCase();
+  if (key !== "gemini" && key !== "groq") return;
+  let badge = bubble.querySelector(".brain-badge");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "brain-badge";
+    bubble.appendChild(badge);
+  }
+  badge.dataset.brain = key;
+  badge.textContent = key === "gemini" ? "Gemini" : "Groq";
 }
 
 function formatBytes(n) {
@@ -3705,7 +3780,9 @@ async function postChatOnce(payload) {
   if (data?.brainUsed && data.brainUsed !== currentBrain) {
     notifyBrainSwitchedByFallback(currentBrain, data.brainUsed);
   }
-  return reply;
+  // Devolvemos también el cerebro real usado para que el chat pueda etiquetar
+  // cada burbuja con su badge (Gemini azul / Groq naranja).
+  return { reply, brainUsed: data?.brainUsed || currentBrain };
 }
 
 async function askGemini(userText) {
@@ -3772,7 +3849,7 @@ async function analyzeWithFiles(userText, attachments) {
   if (data?.brainUsed && data.brainUsed !== currentBrain && !data?.forcedGemini) {
     notifyBrainSwitchedByFallback(currentBrain, data.brainUsed);
   }
-  return reply;
+  return { reply, brainUsed: data?.brainUsed || currentBrain };
 }
 
 async function requestSummary() {
@@ -4196,9 +4273,11 @@ async function handleUserMessage(text) {
   }
 
   try {
-    const replyRaw = attachments.length
+    const result = attachments.length
       ? await analyzeWithFiles(trimmed, attachments)
       : await askGemini(trimmed);
+    const replyRaw = result.reply;
+    const brainUsed = result.brainUsed;
 
     // Si está cansada, agrega una sugerencia de descanso y bosteza
     let reply = replyRaw;
@@ -4206,8 +4285,12 @@ async function handleUserMessage(text) {
     if (restHint) reply = `${replyRaw}\n\n${restHint}`;
     const yawned = maybeYawnIfTired();
 
-    if (thinkingBubble) setBubbleText(thinkingBubble, reply);
-    else appendMessage(reply, "bot");
+    if (thinkingBubble) {
+      setBubbleText(thinkingBubble, reply);
+      tagBubbleBrain(thinkingBubble, brainUsed);
+    } else {
+      appendMessage(reply, "bot", { brain: brainUsed });
+    }
     pushHistory("model", reply);
     if (!yawned) reactHappy(3000);
     speakResponse(reply);
@@ -4655,6 +4738,10 @@ function animate() {
 
       // Los gestos procedurales sólo se ejecutan si el mixer NO está activo.
       if (!customAnimPlaying) tickGesture();
+
+      // Mirada autónoma: cuando el puntero está quieto, los ojos se mueven
+      // solos a posiciones naturales (izq/der/centro/arriba) con suavizado.
+      tickAutonomousGaze(performance.now());
 
       // FASE 8.5 · Motor de Wander universal — sólo si no hay animación
       // externa, gesto activo o carga en curso (tickWander ya lo verifica).

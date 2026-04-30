@@ -163,6 +163,27 @@
         margin-left: 1px;
       }
 
+      /* Badge del cerebro (Gemini / Groq) dentro de cada burbuja de Hina. */
+      .brain-badge {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 1px 7px;
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 14px;
+        border-radius: 8px;
+        letter-spacing: 0.3px;
+        vertical-align: middle;
+        color: #fff;
+        opacity: 0.9;
+      }
+      .brain-badge[data-brain="gemini"] {
+        background: linear-gradient(135deg, #4285f4, #1a73e8);
+      }
+      .brain-badge[data-brain="groq"] {
+        background: linear-gradient(135deg, #f55036, #c73a23);
+      }
+
       #attachment-preview {
         display: none;
         flex-wrap: wrap;
