@@ -1928,14 +1928,26 @@ if (tutorToggleBtn) {
 }
 
 // FASE 8.5 · BOTÓN WANDER (paseo autónomo)
+// IMPORTANTE: el listener de click puede instalarse ya, pero NO podemos leer
+// `wanderEnabled` aquí mismo: ese `let` se declara más abajo (línea ~2362) y
+// está en la Temporal Dead Zone hasta que el módulo termine de evaluarse.
+// Acceder a él en este punto lanza ReferenceError y aborta TODO el script
+// (era exactamente el bug que impedía cargar la app al darle Run).
+// Por eso diferimos la sincronización inicial con setTimeout(..., 0).
 const wanderToggleBtn = document.getElementById("wander-toggle-btn");
 if (wanderToggleBtn) {
   wanderToggleBtn.addEventListener("click", () => setWanderEnabled(!wanderEnabled));
-  refreshWanderUi();
-  // Si quedó activado en una sesión previa y ya hay modelo cargado, arranca.
-  if (wanderEnabled && currentVrm) {
-    setupWanderForVrm(currentVrm);
-  }
+  setTimeout(() => {
+    try {
+      refreshWanderUi();
+      // Si quedó activado en una sesión previa y ya hay modelo cargado, arranca.
+      if (wanderEnabled && currentVrm) {
+        setupWanderForVrm(currentVrm);
+      }
+    } catch (err) {
+      console.warn("[wander] init diferida falló:", err);
+    }
+  }, 0);
 }
 
 // FASE 8.2 · BOTÓN CARGAR TEXTURA EXTERNA
