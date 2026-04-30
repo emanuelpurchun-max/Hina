@@ -1366,15 +1366,47 @@ const HINA_REST_POSE = {
   rightFoot:      { x: 0,     y: 0,     z: 0     },
 };
 
+// Lista canónica de huesos VRM 1.0 que vamos a tocar para garantizar que
+// arrancamos siempre desde T-pose, sin importar si el archivo trae poses
+// embebidas o si resetNormalizedPose() falla en algún humanoid concreto
+// (es exactamente lo que pasaba con cosplay.vrm: brazos quedaban arriba).
+const ALL_VRM_HUMAN_BONES = [
+  "hips", "spine", "chest", "upperChest", "neck", "head",
+  "leftShoulder", "leftUpperArm", "leftLowerArm", "leftHand",
+  "rightShoulder", "rightUpperArm", "rightLowerArm", "rightHand",
+  "leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes",
+  "rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes",
+  "leftThumbMetacarpal", "leftThumbProximal", "leftThumbDistal",
+  "leftIndexProximal", "leftIndexIntermediate", "leftIndexDistal",
+  "leftMiddleProximal", "leftMiddleIntermediate", "leftMiddleDistal",
+  "leftRingProximal", "leftRingIntermediate", "leftRingDistal",
+  "leftLittleProximal", "leftLittleIntermediate", "leftLittleDistal",
+  "rightThumbMetacarpal", "rightThumbProximal", "rightThumbDistal",
+  "rightIndexProximal", "rightIndexIntermediate", "rightIndexDistal",
+  "rightMiddleProximal", "rightMiddleIntermediate", "rightMiddleDistal",
+  "rightRingProximal", "rightRingIntermediate", "rightRingDistal",
+  "rightLittleProximal", "rightLittleIntermediate", "rightLittleDistal",
+];
+
 function normalizeToHinaPose(vrm) {
   if (!vrm.humanoid) return;
-  // 1) reset duro: vuelve TODOS los huesos humanoides a rotación 0 (T-pose nativa)
+  // 1) reset suave del API oficial (en modelos donde funciona, deja todos
+  //    los huesos a quaternion identidad).
   if (typeof vrm.humanoid.resetNormalizedPose === "function") {
-    vrm.humanoid.resetNormalizedPose();
+    try { vrm.humanoid.resetNormalizedPose(); } catch {}
   } else if (typeof vrm.humanoid.resetPose === "function") {
-    vrm.humanoid.resetPose();
+    try { vrm.humanoid.resetPose(); } catch {}
   }
-  // 2) aplica la A-pose canónica de Hina hueso por hueso
+  // 2) reset DURO: cero explícito en CADA hueso humanoide. Esto resuelve el
+  //    bug de cosplay.vrm donde resetNormalizedPose dejaba los hombros con
+  //    una rotación heredada del archivo (brazos hacia arriba).
+  for (const boneName of ALL_VRM_HUMAN_BONES) {
+    const node = vrm.humanoid.getNormalizedBoneNode(boneName);
+    if (!node) continue;
+    node.rotation.set(0, 0, 0);
+    node.quaternion.set(0, 0, 0, 1);
+  }
+  // 3) aplica la A-pose canónica de Hina hueso por hueso
   for (const [boneName, rot] of Object.entries(HINA_REST_POSE)) {
     const node = vrm.humanoid.getNormalizedBoneNode(boneName);
     if (!node) continue;
@@ -1382,7 +1414,7 @@ function normalizeToHinaPose(vrm) {
     node.rotation.y = rot.y;
     node.rotation.z = rot.z;
   }
-  // 3) refresca matrices del rig por si VRM o three las recalculan tarde
+  // 4) refresca matrices del rig por si VRM o three las recalculan tarde
   vrm.scene.updateMatrixWorld(true);
 }
 
@@ -2501,37 +2533,59 @@ function buildWalkClipForVrm(vrm) {
     void kfMid;
   }
 
-  // Piernas (alternadas)
-  addBoneSwing("leftUpperLeg", X, 0.55, 0);
-  addBoneSwing("rightUpperLeg", X, 0.55, 0.5);
-  // Rodilla (siempre flexión positiva al pisar)
-  const lLow = vrm.humanoid.getRawBoneNode("leftLowerLeg");
-  const rLow = vrm.humanoid.getRawBoneNode("rightLowerLeg");
-  if (lLow) {
-    const q0 = lLow.quaternion.clone();
-    const qBend = q0.clone().multiply(_quaternionAroundAxis(X, -0.4));
-    tracks.push(new THREE.QuaternionKeyframeTrack(`${lLow.name}.quaternion`, [0, 0.25, 0.5, 0.75, 1], [
-      q0.x, q0.y, q0.z, q0.w,
-      q0.x, q0.y, q0.z, q0.w,
-      qBend.x, qBend.y, qBend.z, qBend.w,
-      q0.x, q0.y, q0.z, q0.w,
-      q0.x, q0.y, q0.z, q0.w,
-    ]));
+  const Y = new THREE.Vector3(0, 1, 0);
+
+  // Piernas (alternadas) — amplitud aumentada para que el paso sea claramente
+  // visible: la queja del usuario era "se mueve como un lápiz, las piernas
+  // están estáticas". Con 0.85 rad (≈49°) el muslo se levanta de verdad.
+  addBoneSwing("leftUpperLeg", X, 0.85, 0);
+  addBoneSwing("rightUpperLeg", X, 0.85, 0.5);
+
+  // Rodillas — flexión profunda en mitad del ciclo, casi recta al apoyar.
+  // Reconstruimos el ciclo completo de la rodilla (no sólo "bend en el medio").
+  function addKneeCycle(boneName, phaseOffset) {
+    const bone = vrm.humanoid.getRawBoneNode(boneName);
+    if (!bone) return;
+    const q0 = bone.quaternion.clone();
+    const qBend = q0.clone().multiply(_quaternionAroundAxis(X, -0.95));
+    const qSoft = q0.clone().multiply(_quaternionAroundAxis(X, -0.25));
+    // ciclo: extendida → media → flexionada → media → extendida
+    let kfs = [q0, qSoft, qBend, qSoft, q0];
+    if (phaseOffset === 0.5) kfs = [qBend, qSoft, q0, qSoft, qBend];
+    const flat = [];
+    for (const q of kfs) flat.push(q.x, q.y, q.z, q.w);
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${bone.name}.quaternion`,
+      [0, 0.25, 0.5, 0.75, 1],
+      flat,
+    ));
   }
-  if (rLow) {
-    const q0 = rLow.quaternion.clone();
-    const qBend = q0.clone().multiply(_quaternionAroundAxis(X, -0.4));
-    tracks.push(new THREE.QuaternionKeyframeTrack(`${rLow.name}.quaternion`, [0, 0.25, 0.5, 0.75, 1], [
-      qBend.x, qBend.y, qBend.z, qBend.w,
-      q0.x, q0.y, q0.z, q0.w,
-      q0.x, q0.y, q0.z, q0.w,
-      q0.x, q0.y, q0.z, q0.w,
-      qBend.x, qBend.y, qBend.z, qBend.w,
-    ]));
+  addKneeCycle("leftLowerLeg", 0);
+  addKneeCycle("rightLowerLeg", 0.5);
+
+  // Tobillos — pequeño "despegue" cuando la pierna va atrás (planta hacia abajo).
+  function addAnkleCycle(boneName, phaseOffset) {
+    const bone = vrm.humanoid.getRawBoneNode(boneName);
+    if (!bone) return;
+    const q0 = bone.quaternion.clone();
+    const qPoint = q0.clone().multiply(_quaternionAroundAxis(X, 0.35));
+    let kfs = [q0, qPoint, q0];
+    if (phaseOffset === 0.5) kfs = [qPoint, q0, qPoint];
+    const flat = [];
+    for (const q of kfs) flat.push(q.x, q.y, q.z, q.w);
+    tracks.push(new THREE.QuaternionKeyframeTrack(
+      `${bone.name}.quaternion`,
+      [0, 0.5, 1],
+      flat,
+    ));
   }
-  // Brazos (en contrafase con la pierna del mismo lado)
-  addBoneSwing("leftUpperArm", X, 0.32, 0.5);
-  addBoneSwing("rightUpperArm", X, 0.32, 0);
+  addAnkleCycle("leftFoot", 0);
+  addAnkleCycle("rightFoot", 0.5);
+
+  // Brazos (en contrafase con la pierna del mismo lado) — también amplificados.
+  addBoneSwing("leftUpperArm", X, 0.45, 0.5);
+  addBoneSwing("rightUpperArm", X, 0.45, 0);
+
   // Antebrazos: flexión leve constante (codos relajados)
   const lFA = vrm.humanoid.getRawBoneNode("leftLowerArm");
   const rFA = vrm.humanoid.getRawBoneNode("rightLowerArm");
@@ -2544,17 +2598,27 @@ function buildWalkClipForVrm(vrm) {
       qBend.x, qBend.y, qBend.z, qBend.w,
     ]));
   }
-  // Cadera: pequeño rebote vertical cada paso
+
+  // Caderas: rotación lateral sutil (pelvis "swing" natural al caminar)
   const hips = vrm.humanoid.getRawBoneNode("hips");
   if (hips) {
+    const q0 = hips.quaternion.clone();
+    const qLeft = q0.clone().multiply(_quaternionAroundAxis(Y, 0.08));
+    const qRight = q0.clone().multiply(_quaternionAroundAxis(Y, -0.08));
+    tracks.push(new THREE.QuaternionKeyframeTrack(`${hips.name}.quaternion`, [0, 0.5, 1], [
+      qLeft.x, qLeft.y, qLeft.z, qLeft.w,
+      qRight.x, qRight.y, qRight.z, qRight.w,
+      qLeft.x, qLeft.y, qLeft.z, qLeft.w,
+    ]));
+    // Rebote vertical en cada paso
     const baseY = hips.position.y;
     const baseX = hips.position.x;
     const baseZ = hips.position.z;
     tracks.push(new THREE.VectorKeyframeTrack(`${hips.name}.position`, [0, 0.25, 0.5, 0.75, 1], [
       baseX, baseY, baseZ,
-      baseX, baseY + 0.018, baseZ,
+      baseX, baseY + 0.025, baseZ,
       baseX, baseY, baseZ,
-      baseX, baseY + 0.018, baseZ,
+      baseX, baseY + 0.025, baseZ,
       baseX, baseY, baseZ,
     ]));
   }
